@@ -63,11 +63,21 @@ export function collectTexts(components: unknown): string[] {
     return out;
 }
 
+/**
+ * The mobile client stores this key as `customId`, while raw gateway and REST
+ * payloads use `custom_id`. Reading only one spelling made every live panel look
+ * like it had no Leave button, which is how a draw stayed invisible.
+ */
+function customIdOf(node: any): string {
+    const id = node?.custom_id ?? node?.customId;
+    return typeof id === "string" ? id : "";
+}
+
 /** A leave_claim_queue button can only exist while the draw is still open. */
 export function hasLeaveButton(components: unknown): boolean {
     let found = false;
     visitNodes(components, n => {
-        if (n.type === BUTTON && String(n.custom_id ?? "").startsWith(LEAVE_PREFIX)) found = true;
+        if (n.type === BUTTON && customIdOf(n).startsWith(LEAVE_PREFIX)) found = true;
     });
     return found;
 }
