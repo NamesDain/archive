@@ -23,6 +23,14 @@ import { settings, settingText } from "./settings";
 export type GateResult = { ok: true; } | { ok: false; reason: string; };
 
 const joined = new Set<string>();
+
+// Press cycles that came back rejected, per channel. Each cycle is already
+// several attempts inside clicker, so this is a ceiling on how long we keep
+// pushing at a ticket the bot will not accept - without it, every panel edit
+// would start another round and one broken ticket could produce interactions
+// for as long as it stayed open.
+const rejections = new Map<string, number>();
+const MAX_REJECTED_CYCLES = 2;
 let lastActivity = Date.now();
 let lastClick = 0;
 let appStateSubscription: any = null;
@@ -100,6 +108,11 @@ export function allow(channelId: string): GateResult {
     }
     if (joined.has(channelId)) return { ok: false, reason: "already joined this ticket" };
 
+    const failed = rejections.get(channelId) ?? 0;
+    if (failed >= MAX_REJECTED_CYCLES) {
+        return { ok: false, reason: `the bot rejected ${failed} rounds of presses here; not trying again` };
+    }
+
     const sinceClick = Date.now() - lastClick;
     if (sinceClick < settings.cooldownMs) {
         return { ok: false, reason: `cooldown, ${settings.cooldownMs - sinceClick}ms remaining` };
@@ -127,8 +140,22 @@ export function release(channelId: string): void {
     joined.delete(channelId);
 }
 
+/** Records a press cycle the bot would not accept, and reports the running count. */
+export function noteRejection(channelId: string): number {
+    const count = (rejections.get(channelId) ?? 0) + 1;
+    rejections.set(channelId, count);
+    return count;
+}
+
+export function rejectionCount(): number {
+    let total = 0;
+    for (const count of rejections.values()) if (count >= MAX_REJECTED_CYCLES) total++;
+    return total;
+}
+
 export function resetGates(): void {
     joined.clear();
+    rejections.clear();
     lastClick = 0;
 }
 
