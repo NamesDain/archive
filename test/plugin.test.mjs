@@ -237,7 +237,7 @@ describe("editing a setting from the page", () => {
     it("says plainly when nothing is configured yet", () => {
         const c = renderRows();
 
-        assert.match(c.rows.get("Categories").subLabel, /does nothing until/);
+        assert.match(c.rows.get("Categories").subLabel, /^Not set/);
         assert.match(c.rows.get("Ticket bot").subLabel, /Any author/);
         c.plugin.onUnload();
     });

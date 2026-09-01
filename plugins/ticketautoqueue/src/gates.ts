@@ -18,7 +18,7 @@
 import { FluxDispatcher, ReactNative } from "@vendetta/metro/common";
 
 import { parseHourWindow, withinWindow } from "./hours";
-import { settings } from "./settings";
+import { settings, settingText } from "./settings";
 
 export type GateResult = { ok: true; } | { ok: false; reason: string; };
 
@@ -86,7 +86,7 @@ export function isForeground(): boolean {
 
 /** The configured window, or null when unset or unparseable - both mean no restriction. */
 export function hourWindow() {
-    return parseHourWindow(settings.activeHours);
+    return parseHourWindow(settingText(settings.activeHours));
 }
 
 export function withinActiveHours(at: Date = new Date()): boolean {

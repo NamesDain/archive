@@ -19,7 +19,7 @@ import {
 } from "./gates";
 import { collectButtons, matchTicket } from "./matcher";
 import { forgetSessionId, rememberSessionId } from "./session";
-import { initSettings, parseIdList, parseLabelList, settings } from "./settings";
+import { initSettings, parseIdList, parseLabelList, settings, ticketBotId } from "./settings";
 import Settings from "./Settings";
 import { isSweeping, sweepOpenTickets } from "./sweep";
 import { clearUnreachable, unreachableCount } from "./unreachable";
@@ -111,7 +111,7 @@ function handleDraw(message: any, source: string) {
     const selfId = getCurrentUserId();
     if (!selfId) return;
 
-    const outcome = observeDraw(message, selfId, settings.ticketBotId.trim());
+    const outcome = observeDraw(message, selfId, ticketBotId());
 
     if (outcome.kind === "lost") {
         logger.info(`[${source}] draw on #${outcome.draw.channelName} went to ${outcome.winnerId}`);
@@ -283,7 +283,7 @@ function statusReport(): string {
         `**Armed:** ${gates.armed}`,
         `**Categories:** ${categories.length ? categories.join(", ") : "_none configured_"}`,
         `**Labels:** ${parseLabelList(settings.buttonLabels).join(", ") || "_none_"}`,
-        `**Ticket bot:** ${settings.ticketBotId || "_any author (not recommended)_"}`,
+        `**Ticket bot:** ${ticketBotId() || "_any author (not recommended)_"}`,
         `**Name pattern:** ${settings.channelNamePattern || "_none_"}`,
         `**Presence gate:** ${settings.onlyWhenActive ? "on" : "off"} - app is ${gates.foreground ? "in the foreground" : "BACKGROUNDED"}, last used ${Math.round(gates.idleForMs / 1000)}s ago (${gates.active ? "active" : "AWAY"})`,
         `**Active hours:** ${gates.hoursConfigured ? `${settings.activeHours} - currently ${gates.withinHours ? "inside" : "OUTSIDE (not joining)"}` : "_any time_"}`,
@@ -321,7 +321,7 @@ function testReport(channelId: string): string {
         return lines.join("\n");
     }
 
-    const botId = settings.ticketBotId.trim();
+    const botId = ticketBotId();
     const authorOk = !botId || String(withButtons.author?.id) === botId;
     const buttons = collectButtons(withButtons.components);
     const match = matchTicket(withButtons);

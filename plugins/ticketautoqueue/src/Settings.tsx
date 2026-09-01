@@ -23,7 +23,7 @@ import { showInputAlert } from "@vendetta/ui/alerts";
 import { Forms } from "@vendetta/ui/components";
 
 import { parseHourWindow } from "./hours";
-import { DEFAULTS, parseIdList, parseLabelList, parsePattern, settings, TaqSettings } from "./settings";
+import { DEFAULTS, parseIdList, parseLabelList, parsePattern, settings, settingText, TaqSettings, ticketBotId } from "./settings";
 
 const { ScrollView, View } = ReactNative;
 
@@ -84,7 +84,7 @@ function editText(
 ) {
     showInputAlert({
         title,
-        initialValue: settings[key],
+        initialValue: settingText(settings[key]),
         placeholder,
         confirmText: "Save",
         cancelText: "Cancel",
@@ -121,12 +121,12 @@ export default function Settings() {
     const labels = parseLabelList(settings.buttonLabels);
 
     return (
-        <ScrollView style={{ flex: 1 }}>
+        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 48 }}>
             <Container {...containerProps}>
                 <Group title="Master">
                     <SwitchRow
                         label="Armed"
-                        subLabel="Turn off to keep the plugin loaded but stop it pressing anything."
+                        subLabel="Stays loaded but presses nothing"
                         value={settings.armed}
                         onValueChange={(v: boolean) => { settings.armed = v; }}
                     />
@@ -136,8 +136,8 @@ export default function Settings() {
                     <Row
                         label="Categories"
                         subLabel={categories.size
-                            ? `${categories.size} watched: ${[...categories].join(", ")}`
-                            : "Not set — the plugin does nothing until you add one"}
+                            ? `${categories.size} watched`
+                            : "Not set — nothing happens until you add one"}
                         onPress={() => editText(
                             "categoryIds",
                             "Category IDs",
@@ -161,9 +161,7 @@ export default function Settings() {
                     />
                     <Row
                         label="Ticket bot"
-                        subLabel={settings.ticketBotId
-                            ? settings.ticketBotId
-                            : "Any author — anyone could bait a press with a fake button"}
+                        subLabel={ticketBotId() || "Any author (not recommended)"}
                         onPress={() => editText(
                             "ticketBotId",
                             "Ticket bot user ID",
@@ -175,7 +173,7 @@ export default function Settings() {
                     />
                     <Row
                         label="Channel name pattern"
-                        subLabel={settings.channelNamePattern || "No name filter"}
+                        subLabel={settingText(settings.channelNamePattern) || "No name filter"}
                         onPress={() => editText(
                             "channelNamePattern",
                             "Channel name pattern",
@@ -190,7 +188,7 @@ export default function Settings() {
                 <Group title="When to press">
                     <SwitchRow
                         label="Only while you are using Discord"
-                        subLabel="Needs the app in the foreground and recent activity. Stops it claiming a ticket you cannot service."
+                        subLabel="Foreground and recent activity"
                         value={settings.onlyWhenActive}
                         onValueChange={(v: boolean) => { settings.onlyWhenActive = v; }}
                     />
@@ -201,7 +199,7 @@ export default function Settings() {
                     />
                     <Row
                         label="Active hours"
-                        subLabel={settings.activeHours || "Any time"}
+                        subLabel={settingText(settings.activeHours) || "Any time"}
                         onPress={() => editText(
                             "activeHours",
                             "Active hours",
@@ -231,13 +229,13 @@ export default function Settings() {
                 <Group title="Catching up on missed tickets">
                     <SwitchRow
                         label="Sweep after reconnect"
-                        subLabel="No messages arrive while the gateway is down, which on mobile is every time the app is suspended."
+                        subLabel="Catches tickets missed while suspended"
                         value={settings.sweepOnReconnect}
                         onValueChange={(v: boolean) => { settings.sweepOnReconnect = v; }}
                     />
                     <SwitchRow
                         label="Sweep on startup"
-                        subLabel="Off by default: after time away this can join a burst of tickets at once."
+                        subLabel="May join a burst after time away"
                         value={settings.catchUpOnStart}
                         onValueChange={(v: boolean) => { settings.catchUpOnStart = v; }}
                     />
@@ -256,19 +254,19 @@ export default function Settings() {
                 <Group title="Draws and alerts">
                     <SwitchRow
                         label="Alert when the draw picks you"
-                        subLabel="Stays up until dismissed, because one you miss is worthless."
+                        subLabel="Stays up until dismissed"
                         value={settings.notifyOnWin}
                         onValueChange={(v: boolean) => { settings.notifyOnWin = v; }}
                     />
                     <SwitchRow
                         label="Jump to the ticket on a win"
-                        subLabel="Opens the channel as soon as you are selected."
+                        subLabel="Opens the channel for you"
                         value={settings.autoNavigateOnWin}
                         onValueChange={(v: boolean) => { settings.autoNavigateOnWin = v; }}
                     />
                     <SwitchRow
                         label="Warn if a draw closes while you are away"
-                        subLabel="You stay in the queue either way — this never forfeits a ticket for you."
+                        subLabel="Never forfeits your place"
                         value={settings.warnIfAwayOnDraw}
                         onValueChange={(v: boolean) => { settings.warnIfAwayOnDraw = v; }}
                     />
@@ -292,13 +290,13 @@ export default function Settings() {
                     />
                     <SwitchRow
                         label="Verbose logging"
-                        subLabel="Log every match decision. Turn this on while setting up, then use /taq test in a ticket."
+                        subLabel="Log every match decision"
                         value={settings.verboseLogging}
                         onValueChange={(v: boolean) => { settings.verboseLogging = v; }}
                     />
                     <Row
                         label="Reset all settings"
-                        subLabel="Puts every value back to its default."
+                        subLabel="Back to defaults"
                         onPress={() => {
                             for (const [key, value] of Object.entries(DEFAULTS)) {
                                 (settings as any)[key] = value;
