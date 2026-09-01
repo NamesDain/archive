@@ -29,6 +29,26 @@ export function forgetSessionId(): void {
     sessionId = null;
 }
 
+/**
+ * What the status command reports. The id itself is never shown in full - it is a
+ * live credential for this gateway connection - but whether one is held, and how
+ * it was obtained, is the first thing to check when Discord accepts an interaction
+ * and the bot never acts on it.
+ */
+export function sessionStatus(): { held: boolean; source: string; hint: string; } {
+    if (sessionId) return { held: true, source: "CONNECTION_OPEN", hint: redact(sessionId) };
+
+    const id = getSessionId();
+    if (id) return { held: true, source: "module lookup", hint: redact(id) };
+
+    return { held: false, source: "none", hint: "—" };
+}
+
+/** Enough to tell two sessions apart in a report, not enough to reuse. */
+function redact(id: string): string {
+    return id.length <= 8 ? "********" : `${id.slice(0, 4)}…${id.slice(-4)} (${id.length} chars)`;
+}
+
 export function getSessionId(): string | null {
     if (sessionId) return sessionId;
 

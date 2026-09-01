@@ -22,15 +22,16 @@ import { getSessionId } from "./session";
 const MESSAGE_COMPONENT = 3;
 const COMPONENT_TYPE_BUTTON = 2;
 
-export type PressResult = "api" | "failed" | "no-session";
+/** "sent" is only that: Discord accepted the interaction for delivery. */
+export type PressResult = "sent" | "failed" | "no-session";
 
 function generateNonce(): string {
     // Discord only requires per-request uniqueness here.
     return String(BigInt(Date.now() - 1420070400000) << 22n);
 }
 
-export async function clickViaApi(target: TicketTarget, sessionId: string): Promise<void> {
-    await withRateLimitRetry("interaction", () => RestAPI().post({
+export async function clickViaApi(target: TicketTarget, sessionId: string): Promise<any> {
+    return withRateLimitRetry<any>("interaction", () => RestAPI().post({
         url: "/interactions",
         body: {
             type: MESSAGE_COMPONENT,
@@ -49,6 +50,16 @@ export async function clickViaApi(target: TicketTarget, sessionId: string): Prom
     }));
 }
 
+/**
+ * Sends the button press.
+ *
+ * "sent" means exactly that and no more. Discord answers this endpoint as soon as
+ * it has accepted the interaction for delivery - a 204 says nothing about whether
+ * the bot ever handled it. Reporting that as "joined the queue" told an operator
+ * they were in a queue they were not in, so the wording here, and the toast it
+ * feeds, now claim only what the response actually establishes. The bot's own
+ * reply is what settles it, and that arrives later as a message edit.
+ */
 export async function press(target: TicketTarget): Promise<PressResult> {
     const sessionId = getSessionId();
     if (!sessionId) {
@@ -59,8 +70,13 @@ export async function press(target: TicketTarget): Promise<PressResult> {
     }
 
     try {
-        await clickViaApi(target, sessionId);
-        return "api";
+        const res = await clickViaApi(target, sessionId);
+        logger.info(
+            `Interaction accepted for "${target.label}" in #${target.channelName} ` +
+            `(HTTP ${res?.status ?? "?"}). Discord has taken the press; whether the bot ` +
+            "acts on it shows up on the panel itself."
+        );
+        return "sent";
     } catch (err) {
         logger.error("Interaction dispatch failed:", err);
         return "failed";

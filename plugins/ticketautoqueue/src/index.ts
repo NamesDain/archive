@@ -18,7 +18,7 @@ import {
     startActivityTracking, stopActivityTracking, withinActiveHours
 } from "./gates";
 import { collectButtons, customIdOf, matchTicket } from "./matcher";
-import { forgetSessionId, rememberSessionId } from "./session";
+import { forgetSessionId, rememberSessionId, sessionStatus } from "./session";
 import { initSettings, parseIdList, parseLabelList, settings, ticketBotId } from "./settings";
 import Settings from "./Settings";
 import { isSweeping, sweepOpenTickets } from "./sweep";
@@ -95,7 +95,7 @@ async function handleMessage(message: any, source: string, retriesLeft = 2) {
     reserve(target.channelId);
 
     const result = await press(target);
-    if (result !== "api") {
+    if (result !== "sent") {
         release(target.channelId);
         logger.error(`Failed to press "${target.label}" in #${target.channelName} (${result})`);
         toastFailure(`TicketAutoQueue: failed on #${target.channelName}`);
@@ -103,8 +103,7 @@ async function handleMessage(message: any, source: string, retriesLeft = 2) {
     }
 
     trackDraw(target.channelId, target.channelName, settings.drawWatchWindowMs);
-    logger.info(`Pressed "${target.label}" in #${target.channelName}`);
-    toastSuccess(`Joined queue: #${target.channelName}`);
+    toastSuccess(`Pressed Join Queue: #${target.channelName}`);
 }
 
 function handleDraw(message: any, source: string) {
@@ -287,8 +286,14 @@ function statusReport(): string {
         `**Name pattern:** ${settings.channelNamePattern || "_none_"}`,
         `**Presence gate:** ${settings.onlyWhenActive ? "on" : "off"} - app is ${gates.foreground ? "in the foreground" : "BACKGROUNDED"}, last used ${Math.round(gates.idleForMs / 1000)}s ago (${gates.active ? "active" : "AWAY"})`,
         `**Active hours:** ${gates.hoursConfigured ? `${settings.activeHours} - currently ${gates.withinHours ? "inside" : "OUTSIDE (not joining)"}` : "_any time_"}`,
-        `**Queues joined this session:** ${gates.joinedCount} _(joins, not wins)_`
+        `**Queues joined this session:** ${gates.joinedCount} _(presses sent, not wins)_`
     ];
+
+    // A press needs this, and Discord will accept an interaction carrying a stale
+    // one and then never route the bot's reply back - which surfaces only as
+    // "This interaction failed" on the panel, with nothing logged here.
+    const session = sessionStatus();
+    lines.push(`**Gateway session:** ${session.held ? `held via ${session.source} — ${session.hint}` : "**NONE — presses cannot work**"}`);
 
     const period = settings.periodicSweepMs;
     const sinceSweep = lastAutoSweepAt ? `${Math.round((Date.now() - lastAutoSweepAt) / 1000)}s ago` : "never";

@@ -171,10 +171,10 @@ export async function sweepOpenTickets(): Promise<SweepStats> {
                 reserve(target.channelId);
 
                 const result = await press(target);
-                if (result === "api") {
+                if (result === "sent") {
                     stats.joined++;
                     trackDraw(target.channelId, target.channelName, settings.drawWatchWindowMs);
-                    logger.info(`[SWEEP] pressed "${target.label}" in #${target.channelName}`);
+                    logger.info(`[SWEEP] sent "${target.label}" press in #${target.channelName}`);
                 } else {
                     release(target.channelId);
                     stats.failed++;
