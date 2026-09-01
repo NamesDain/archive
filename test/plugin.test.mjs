@@ -49,6 +49,54 @@ function loadConfigured(overrides = {}) {
 
 const settle = () => new Promise(r => setTimeout(r, 60));
 
+/**
+ * Renders an element tree, invoking function components as it goes.
+ *
+ * The page composes its fields out of local components (TextSetting and friends),
+ * so a createElement stub that only records its arguments never runs their bodies
+ * and sees the wrapper's props rather than the field's. Calling function types is
+ * what makes assertions about a field's onChange, description and errorMessage
+ * mean anything.
+ */
+function walk(node, visit) {
+    if (node === null || node === undefined || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+        for (const child of node) walk(child, visit);
+        return;
+    }
+
+    const { type, props } = node;
+    if (typeof type === "function") {
+        walk(type(props ?? {}), visit);
+        return;
+    }
+
+    visit(type, props ?? {});
+    walk(props?.children, visit);
+}
+
+/** A createElement that keeps children on props, so walk can descend. */
+function recordingCreateElement() {
+    return (type, props, ...children) => ({
+        type,
+        props: { ...(props ?? {}), children: children.length === 1 ? children[0] : children }
+    });
+}
+
+/** Renders the settings page and returns what was drawn. */
+function renderSettings(mock, plugin) {
+    mock.vendetta.metro.common.React.createElement = recordingCreateElement();
+    const tree = plugin.settings();
+
+    const drawn = [];
+    const byLabel = new Map();
+    walk(tree, (type, props) => {
+        drawn.push(typeof type === "string" ? type : type?.name ?? "component");
+        if (props?.label) byLabel.set(props.label, props);
+    });
+    return { tree, drawn, byLabel };
+}
+
 describe("loading", () => {
     it("evaluates under Kettu's eval wrapper and exports the plugin shape", () => {
         const { vendetta } = createMockVendetta();
@@ -86,39 +134,31 @@ describe("loading", () => {
     });
 
     it("renders its settings page on Discord's current table components", () => {
-        const { vendetta } = createMockVendetta();
-        const created = [];
-        vendetta.metro.common.React.createElement = (type, props, ...children) => {
-            created.push(typeof type === "string" ? type : type?.name ?? "component");
-            return { type, props, children };
-        };
-
-        const plugin = evalPlugin(BUNDLE, vendetta);
+        const mock = createMockVendetta();
+        const plugin = evalPlugin(BUNDLE, mock.vendetta);
         plugin.onLoad();
 
-        const tree = plugin.settings();
+        const { tree, drawn } = renderSettings(mock, plugin);
 
         assert.ok(tree, "the settings component must return an element");
-        assert.ok(created.includes("ScrollView"), "expected the page to be scrollable");
-        assert.ok(created.includes("TableRowGroup"), "expected modern grouped rows, not legacy Forms");
-        assert.ok(created.includes("TableSwitchRow"), "expected modern switch rows");
-        assert.ok(!created.includes("FormSection"), "legacy Forms should not be used when tables resolve");
+        assert.ok(drawn.includes("ScrollView"), "expected the page to be scrollable");
+        assert.ok(drawn.includes("TableRowGroup"), "expected modern grouped rows, not legacy Forms");
+        assert.ok(drawn.includes("TableSwitchRow"), "expected modern switch rows");
+        assert.ok(drawn.includes("TextInput"), "expected Discord's own text field");
+        assert.ok(!drawn.includes("FormSection"), "legacy Forms should not be used when tables resolve");
         plugin.onUnload();
     });
 
-    it("falls back to legacy Forms if the table components have moved", () => {
-        const { vendetta } = createMockVendetta({ modernComponents: false });
-        const created = [];
-        vendetta.metro.common.React.createElement = (type, props, ...children) => {
-            created.push(typeof type === "string" ? type : type?.name ?? "component");
-            return { type, props, children };
-        };
-
-        const plugin = evalPlugin(BUNDLE, vendetta);
+    it("falls back to legacy Forms and a native field if the modern ones have moved", () => {
+        const mock = createMockVendetta({ modernComponents: false });
+        const plugin = evalPlugin(BUNDLE, mock.vendetta);
         plugin.onLoad();
 
-        assert.ok(plugin.settings(), "the page must still render without the table components");
-        assert.ok(created.includes("ScrollView"), "expected the page to still be scrollable");
+        const { tree, drawn } = renderSettings(mock, plugin);
+
+        assert.ok(tree, "the page must still render without the modern components");
+        assert.ok(drawn.includes("ScrollView"), "expected the page to still be scrollable");
+        assert.ok(drawn.includes("FormSection"), "expected the legacy group fallback");
         plugin.onUnload();
     });
 
@@ -144,110 +184,115 @@ describe("loading", () => {
 });
 
 describe("editing a setting from the page", () => {
-    /** Renders the page and returns the row props keyed by label. */
-    function renderRows() {
+    /** Renders the page and returns every field's props keyed by its label. */
+    function renderFields() {
         const mock = createMockVendetta();
-        const rows = new Map();
-        mock.vendetta.metro.common.React.createElement = (type, props, ...children) => {
-            if (props?.label) rows.set(props.label, props);
-            return { type, props, children };
-        };
-
         const plugin = evalPlugin(BUNDLE, mock.vendetta);
         plugin.onLoad();
-        plugin.settings();
-        return { ...mock, plugin, rows };
+        const { byLabel } = renderSettings(mock, plugin);
+        return { ...mock, plugin, fields: byLabel, rerender: () => renderSettings(mock, plugin).byLabel };
     }
 
-    it("opens an input dialog seeded with the current value", () => {
-        const c = renderRows();
-        c.rows.get("Button labels").onPress();
+    // The dialog this replaced resolved a component that no longer exists on
+    // current Discord iOS, so calling it took the whole app down. The mock throws
+    // the same error, which makes every test here a guard against bringing it back.
+    it("never uses the input dialog that crashes the app", () => {
+        const c = renderFields();
 
-        assert.equal(c.calls.inputAlerts.length, 1);
-        assert.equal(c.calls.inputAlerts[0].initialValue, "Join Queue");
+        for (const [, props] of c.fields) props.onChange?.("x");
+
+        assert.equal(c.calls.inputAlerts.length, 0, "showInputAlert must not be called");
         c.plugin.onUnload();
     });
 
-    it("saves a valid value", async () => {
-        const c = renderRows();
-        c.rows.get("Categories").onPress();
+    it("edits a text setting in place", () => {
+        const c = renderFields();
 
-        await c.calls.inputAlerts[0].onConfirm("333333333333333333, 444444444444444444");
+        c.fields.get("Category IDs").onChange("333333333333333333, 444444444444444444");
 
         assert.equal(c.storage.categoryIds, "333333333333333333, 444444444444444444");
         c.plugin.onUnload();
     });
 
-    it("rejects input with no valid IDs instead of silently going inert", async () => {
-        const c = renderRows();
-        const before = c.storage.categoryIds;
-        c.rows.get("Categories").onPress();
+    it("accepts the text either as a string or as a native change event", () => {
+        const c = renderFields();
 
-        await assert.rejects(
-            () => Promise.resolve(c.calls.inputAlerts[0].onConfirm("not-an-id")),
-            /No valid IDs/
-        );
-        assert.equal(c.storage.categoryIds, before, "a rejected value must not be written");
+        c.fields.get("Button labels").onChange({ nativeEvent: { text: "Claim" } });
+
+        assert.equal(c.storage.buttonLabels, "Claim", "the native fallback reports an event, not a string");
         c.plugin.onUnload();
     });
 
-    it("rejects a regex that will not compile", async () => {
-        const c = renderRows();
-        c.rows.get("Channel name pattern").onPress();
+    it("flags input with no valid IDs instead of silently going inert", () => {
+        const c = renderFields();
 
-        await assert.rejects(
-            () => Promise.resolve(c.calls.inputAlerts[0].onConfirm("^ticket-[")),
-            /not a valid regular expression/
-        );
+        assert.equal(c.fields.get("Category IDs").errorMessage, undefined, "empty is not an error");
+
+        c.storage.categoryIds = "not-an-id";
+
+        assert.match(c.rerender().get("Category IDs").errorMessage, /No valid IDs/);
         c.plugin.onUnload();
     });
 
-    it("rejects a malformed active-hours window", async () => {
-        const c = renderRows();
-        c.rows.get("Active hours").onPress();
+    it("flags a regex that will not compile", () => {
+        const c = renderFields();
+        c.storage.channelNamePattern = "^ticket-[";
 
-        await assert.rejects(
-            () => Promise.resolve(c.calls.inputAlerts[0].onConfirm("9am-11pm")),
-            /HH:MM-HH:MM/
-        );
+        assert.match(c.rerender().get("Channel name pattern").errorMessage, /valid regular expression/);
         c.plugin.onUnload();
     });
 
-    it("rejects a non-numeric duration rather than storing NaN", async () => {
-        const c = renderRows();
-        c.rows.get("Cooldown between presses").onPress();
+    it("flags a malformed active-hours window", () => {
+        const c = renderFields();
+        c.storage.activeHours = "9am-11pm";
 
-        await assert.rejects(
-            () => Promise.resolve(c.calls.inputAlerts[0].onConfirm("three seconds")),
-            /number of milliseconds/
-        );
-        assert.equal(c.storage.cooldownMs, 3000, "the old value must survive a rejected edit");
+        assert.match(c.rerender().get("Active hours").errorMessage, /HH:MM-HH:MM/);
         c.plugin.onUnload();
     });
 
-    it("shows durations in readable units, not raw milliseconds", () => {
-        const c = renderRows();
+    it("will not write a half-typed or cleared duration", () => {
+        const c = renderFields();
+        const field = c.fields.get("Cooldown between presses");
 
-        assert.equal(c.rows.get("Counts as away after").subLabel, "5 min");
-        assert.equal(c.rows.get("Cooldown between presses").subLabel, "3s");
-        assert.equal(c.rows.get("Periodic re-scan").subLabel, "Off");
+        field.onChange("three");
+        assert.equal(c.storage.cooldownMs, 3000, "a non-numeric draft must not be stored");
+
+        field.onChange("");
+        assert.equal(c.storage.cooldownMs, 3000, "a cleared field must not store NaN");
+
+        field.onChange("5000");
+        assert.equal(c.storage.cooldownMs, 5000, "a valid number is stored");
+        c.plugin.onUnload();
+    });
+
+    it("describes durations in readable units", () => {
+        const c = renderFields();
+
+        assert.equal(c.fields.get("Counts as away after").description, "5 minutes");
+        assert.equal(c.fields.get("Cooldown between presses").description, "3 seconds");
+        assert.equal(c.fields.get("Periodic re-scan").description, "Off");
         c.plugin.onUnload();
     });
 
     it("says plainly when nothing is configured yet", () => {
-        const c = renderRows();
+        const c = renderFields();
 
-        assert.match(c.rows.get("Categories").subLabel, /^Not set/);
-        assert.match(c.rows.get("Ticket bot").subLabel, /Any author/);
+        assert.match(c.fields.get("Category IDs").description, /Nothing happens until/);
+        assert.match(c.fields.get("Ticket bot user ID").description, /Any author/);
         c.plugin.onUnload();
     });
 
-    it("resets every value to its default", () => {
-        const c = renderRows();
+    it("resets every value to its default, but only after confirmation", () => {
+        const c = renderFields();
         c.storage.armed = false;
         c.storage.categoryIds = "333333333333333333";
 
-        c.rows.get("Reset all settings").onPress();
+        c.fields.get("Reset all settings").onValueChange(true);
+
+        assert.equal(c.calls.alerts.length, 1, "resetting must ask first");
+        assert.equal(c.storage.armed, false, "nothing changes until the alert is confirmed");
+
+        c.calls.alerts[0].onConfirm();
 
         assert.equal(c.storage.armed, true);
         assert.equal(c.storage.categoryIds, "");

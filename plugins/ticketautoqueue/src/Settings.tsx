@@ -6,24 +6,30 @@
  * Ported from the Vencord plugin of the same name.
  */
 
-// Built on Discord's current table components rather than the legacy Forms set.
-// Forms still resolves, but it renders as an unstyled run of rows on modern
-// builds - which is what this page looked like before.
+// Editing happens in fields on the page, not in a dialog.
 //
-// Text and numeric settings open an input dialog on tap instead of embedding a
-// field in the row. That reads better on a phone, and it gives each value a
-// place to be validated: showInputAlert keeps the dialog open and shows the
-// message when onConfirm rejects, so a bad category ID or an uncompilable regex
-// is caught at the point of entry rather than silently making the plugin inert.
+// The dialog version crashed the app. Kettu's showInputAlert renders its input
+// inside LegacyAlert, which it resolves by the display name "FluxContainer(Alert)"
+// - and that component no longer exists in current Discord iOS, so tapping any
+// text row threw "byDisplayName(FluxContainer(Alert)) is undefined" and took
+// Discord down with it. Nothing here may depend on that component.
+//
+// An inline TextInput inside a TableRowGroup is what Discord's own settings use
+// and what shipped plugins on this client do. It also gives validation somewhere
+// better to live: the field shows the problem as you type, rather than waiting
+// for a confirm button.
 
-import { findByProps } from "@vendetta/metro";
+import { find, findByProps } from "@vendetta/metro";
 import { React, ReactNative } from "@vendetta/metro/common";
 import { useProxy } from "@vendetta/storage";
-import { showInputAlert } from "@vendetta/ui/alerts";
+import { showConfirmationAlert } from "@vendetta/ui/alerts";
 import { Forms } from "@vendetta/ui/components";
 
 import { parseHourWindow } from "./hours";
-import { DEFAULTS, parseIdList, parseLabelList, parsePattern, settings, settingText, TaqSettings, ticketBotId } from "./settings";
+import {
+    DEFAULTS, parseIdList, parseLabelList, parsePattern, settings, settingText, TaqSettings
+} from "./settings";
+import { toast } from "./ui";
 
 const { ScrollView, View } = ReactNative;
 
@@ -35,12 +41,9 @@ const LegacyGroup = ({ title, children }: any) =>
     <Forms.FormSection title={title}>{children}</Forms.FormSection>;
 const LegacySwitchRow = ({ label, subLabel, value, onValueChange }: any) =>
     <Forms.FormSwitchRow label={label} subLabel={subLabel} value={value} onValueChange={onValueChange} />;
-const LegacyRow = ({ label, subLabel, onPress }: any) =>
-    <Forms.FormRow label={label} subLabel={subLabel} onPress={onPress} />;
 
 const Group = tables?.TableRowGroup ?? LegacyGroup;
 const SwitchRow = tables?.TableSwitchRow ?? LegacySwitchRow;
-const Row = tables?.TableRow ?? LegacyRow;
 
 // Discord's own spacing primitive. A plain View is the fallback rather than a
 // `gap` style, which needs React Native 0.71 and is not in every build here.
@@ -51,74 +54,113 @@ const containerProps: any = {
     ...(Stack ? { spacing: 16 } : {})
 };
 
-type BooleanKey = { [K in keyof TaqSettings]: TaqSettings[K] extends boolean ? K : never }[keyof TaqSettings];
+/**
+ * Discord's text field lives in a module that exports nothing else, which is how
+ * the client itself finds it; a plain findByProps can land on an unrelated module
+ * that happens to re-export one. React Native's own TextInput is the last resort -
+ * it looks nothing like the rest of the page, but it cannot be missing.
+ */
+const DiscordTextInput =
+    find((m: any) => m?.TextInput && Object.keys(m).length === 1)?.TextInput
+    ?? findByProps("TextInput")?.TextInput;
+const Field = DiscordTextInput ?? (ReactNative as any).TextInput;
+const fieldIsNative = !DiscordTextInput;
+
 type StringKey = { [K in keyof TaqSettings]: TaqSettings[K] extends string ? K : never }[keyof TaqSettings];
 type NumberKey = { [K in keyof TaqSettings]: TaqSettings[K] extends number ? K : never }[keyof TaqSettings];
 
-/** Durations are stored in milliseconds; nobody wants to read "300000" in a list. */
-function formatMs(ms: number): string {
-    if (!Number.isFinite(ms)) return "not set";
-    if (ms === 0) return "off";
-    if (ms < 1000) return `${ms} ms`;
-    const round = (n: number) => (Number.isInteger(n) ? String(n) : n.toFixed(1));
-    const seconds = ms / 1000;
-    if (seconds < 60) return `${round(seconds)}s`;
-    const minutes = seconds / 60;
-    if (minutes < 60) return `${round(minutes)} min`;
-    return `${round(minutes / 60)} h`;
+/** Discord's field reports a string; React Native's reports an event. Accept either. */
+function changedText(value: any): string {
+    if (typeof value === "string") return value;
+    return value?.nativeEvent?.text ?? value?.text ?? "";
+}
+
+/** Only the bare React Native fallback needs styling; Discord's field styles itself. */
+const nativeFieldStyle = fieldIsNative
+    ? { padding: 12, margin: 12, borderRadius: 8, backgroundColor: "#1e1f22", color: "#f2f3f5" }
+    : undefined;
+
+function TextSetting({ setting, label, placeholder, describe, validate }: {
+    setting: StringKey;
+    label: string;
+    placeholder: string;
+    describe?: (value: string) => string | undefined;
+    validate?: (value: string) => string | undefined;
+}) {
+    const value = settingText(settings[setting]);
+    const problem = validate?.(value);
+
+    const onChange = (raw: any) => { settings[setting] = changedText(raw); };
+
+    return (
+        <Field
+            label={label}
+            placeholder={placeholder}
+            placeholderTextColor="#80848e"
+            value={value}
+            // Discord's field calls onChange with the text, React Native's calls
+            // onChangeText with it. Passing both means neither needs a special case.
+            onChange={onChange}
+            onChangeText={onChange}
+            description={problem ? undefined : describe?.(value)}
+            errorMessage={problem}
+            state={problem ? "error" : "default"}
+            isClearable
+            style={nativeFieldStyle}
+        />
+    );
 }
 
 /**
- * showInputAlert closes on a resolved promise and shows the message on a rejected
- * one. Rejecting rather than throwing is deliberate: it calls onConfirm inside
- * `Promise.resolve(...)`, so a synchronous throw would escape the press handler
- * instead of reaching its catch.
+ * Numbers are held as text while being edited and only written back once they
+ * parse. Committing every keystroke would store 30 on the way to 30000, and a
+ * cleared field would store NaN - which compares false against every threshold
+ * and would quietly disable whichever gate reads it.
  */
-const invalid = (message: string) => Promise.reject(new Error(message));
+function NumberSetting({ setting, label, hint }: { setting: NumberKey; label: string; hint: string; }) {
+    const [draft, setDraft] = React.useState(String(settings[setting]));
 
-function editText(
-    key: StringKey,
-    title: string,
-    placeholder: string,
-    validate?: (value: string) => string | null
-) {
-    showInputAlert({
-        title,
-        initialValue: settingText(settings[key]),
-        placeholder,
-        confirmText: "Save",
-        cancelText: "Cancel",
-        onConfirm: (input: string) => {
-            const value = input.trim();
-            const problem = validate?.(value);
-            if (problem) return invalid(problem);
-            settings[key] = value;
-        }
-    });
+    const parsed = Number(draft.trim());
+    const valid = draft.trim() !== "" && Number.isFinite(parsed) && parsed >= 0;
+
+    const onChange = (raw: any) => {
+        const text = changedText(raw);
+        setDraft(text);
+        const next = Number(text.trim());
+        if (text.trim() !== "" && Number.isFinite(next) && next >= 0) settings[setting] = next;
+    };
+
+    return (
+        <Field
+            label={label}
+            placeholder={hint}
+            placeholderTextColor="#80848e"
+            keyboardType="numeric"
+            value={draft}
+            onChange={onChange}
+            onChangeText={onChange}
+            description={valid ? describeMs(parsed) : undefined}
+            errorMessage={valid ? undefined : "Enter a whole number of milliseconds, 0 or higher."}
+            state={valid ? "default" : "error"}
+            style={nativeFieldStyle}
+        />
+    );
 }
 
-function editNumber(key: NumberKey, title: string, hint: string) {
-    showInputAlert({
-        title,
-        initialValue: String(settings[key]),
-        placeholder: hint,
-        confirmText: "Save",
-        cancelText: "Cancel",
-        onConfirm: (input: string) => {
-            const value = Number(input.trim());
-            if (!Number.isFinite(value) || value < 0) {
-                return invalid("Enter a number of milliseconds, 0 or higher.");
-            }
-            settings[key] = value;
-        }
-    });
+/** Durations are stored in milliseconds; nobody wants to read "300000" unaided. */
+function describeMs(ms: number): string {
+    if (ms === 0) return "Off";
+    const round = (n: number) => (Number.isInteger(n) ? String(n) : n.toFixed(1));
+    const seconds = ms / 1000;
+    if (seconds < 1) return `${ms} ms`;
+    if (seconds < 60) return `${round(seconds)} seconds`;
+    const minutes = seconds / 60;
+    if (minutes < 60) return `${round(minutes)} minutes`;
+    return `${round(minutes / 60)} hours`;
 }
 
 export default function Settings() {
     useProxy(settings);
-
-    const categories = parseIdList(settings.categoryIds);
-    const labels = parseLabelList(settings.buttonLabels);
 
     return (
         <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 48 }}>
@@ -133,55 +175,44 @@ export default function Settings() {
                 </Group>
 
                 <Group title="What to watch">
-                    <Row
-                        label="Categories"
-                        subLabel={categories.size
-                            ? `${categories.size} watched`
-                            : "Not set — nothing happens until you add one"}
-                        onPress={() => editText(
-                            "categoryIds",
-                            "Category IDs",
-                            "comma-separated IDs",
-                            value => value && parseIdList(value).size === 0
-                                ? "No valid IDs found. Each must be 17-20 digits, separated by commas."
-                                : null
-                        )}
+                    <TextSetting
+                        setting="categoryIds"
+                        label="Category IDs"
+                        placeholder="comma-separated IDs"
+                        describe={value => {
+                            const found = parseIdList(value).size;
+                            return found ? `${found} watched` : "Nothing happens until you add one";
+                        }}
+                        validate={value => value && parseIdList(value).size === 0
+                            ? "No valid IDs. Each is 17-20 digits, separated by commas."
+                            : undefined}
                     />
-                    <Row
+                    <TextSetting
+                        setting="buttonLabels"
                         label="Button labels"
-                        subLabel={labels.length ? labels.join(", ") : "Not set — nothing will match"}
-                        onPress={() => editText(
-                            "buttonLabels",
-                            "Button labels",
-                            "Join Queue",
-                            value => parseLabelList(value).length === 0
-                                ? "Give at least one label to press."
-                                : null
-                        )}
+                        placeholder="Join Queue"
+                        describe={() => "Case-insensitive, comma-separated"}
+                        validate={value => parseLabelList(value).length === 0
+                            ? "Give at least one label to press."
+                            : undefined}
                     />
-                    <Row
-                        label="Ticket bot"
-                        subLabel={ticketBotId() || "Any author (not recommended)"}
-                        onPress={() => editText(
-                            "ticketBotId",
-                            "Ticket bot user ID",
-                            "leave empty to allow any author",
-                            value => value && parseIdList(value).size !== 1
-                                ? "Enter a single user ID of 17-20 digits, or leave it empty."
-                                : null
-                        )}
+                    <TextSetting
+                        setting="ticketBotId"
+                        label="Ticket bot user ID"
+                        placeholder="empty allows any author"
+                        describe={value => value ? undefined : "Any author — not recommended"}
+                        validate={value => value && parseIdList(value).size !== 1
+                            ? "Enter one user ID of 17-20 digits, or leave empty."
+                            : undefined}
                     />
-                    <Row
+                    <TextSetting
+                        setting="channelNamePattern"
                         label="Channel name pattern"
-                        subLabel={settingText(settings.channelNamePattern) || "No name filter"}
-                        onPress={() => editText(
-                            "channelNamePattern",
-                            "Channel name pattern",
-                            "regex, e.g. ^ticket-",
-                            value => value && !parsePattern(value)
-                                ? "That is not a valid regular expression."
-                                : null
-                        )}
+                        placeholder="regex, e.g. ^ticket-"
+                        describe={value => value ? undefined : "No name filter"}
+                        validate={value => value && !parsePattern(value)
+                            ? "Not a valid regular expression."
+                            : undefined}
                     />
                 </Group>
 
@@ -192,38 +223,19 @@ export default function Settings() {
                         value={settings.onlyWhenActive}
                         onValueChange={(v: boolean) => { settings.onlyWhenActive = v; }}
                     />
-                    <Row
-                        label="Counts as away after"
-                        subLabel={formatMs(settings.idleThresholdMs)}
-                        onPress={() => editNumber("idleThresholdMs", "Idle threshold", "milliseconds")}
-                    />
-                    <Row
+                    <NumberSetting setting="idleThresholdMs" label="Counts as away after" hint="milliseconds" />
+                    <TextSetting
+                        setting="activeHours"
                         label="Active hours"
-                        subLabel={settingText(settings.activeHours) || "Any time"}
-                        onPress={() => editText(
-                            "activeHours",
-                            "Active hours",
-                            "09:00-23:00",
-                            value => value && !parseHourWindow(value)
-                                ? "Use HH:MM-HH:MM, for example 09:00-23:00. It may wrap midnight."
-                                : null
-                        )}
+                        placeholder="09:00-23:00"
+                        describe={value => value ? undefined : "Any time"}
+                        validate={value => value && !parseHourWindow(value)
+                            ? "Use HH:MM-HH:MM. It may wrap midnight."
+                            : undefined}
                     />
-                    <Row
-                        label="Delay before pressing"
-                        subLabel={`${formatMs(settings.minDelayMs)} to ${formatMs(settings.maxDelayMs)}`}
-                        onPress={() => editNumber("minDelayMs", "Minimum delay", "milliseconds")}
-                    />
-                    <Row
-                        label="Maximum delay"
-                        subLabel={formatMs(settings.maxDelayMs)}
-                        onPress={() => editNumber("maxDelayMs", "Maximum delay", "milliseconds")}
-                    />
-                    <Row
-                        label="Cooldown between presses"
-                        subLabel={formatMs(settings.cooldownMs)}
-                        onPress={() => editNumber("cooldownMs", "Cooldown", "milliseconds")}
-                    />
+                    <NumberSetting setting="minDelayMs" label="Minimum delay before pressing" hint="milliseconds" />
+                    <NumberSetting setting="maxDelayMs" label="Maximum delay before pressing" hint="milliseconds" />
+                    <NumberSetting setting="cooldownMs" label="Cooldown between presses" hint="milliseconds" />
                 </Group>
 
                 <Group title="Catching up on missed tickets">
@@ -239,16 +251,8 @@ export default function Settings() {
                         value={settings.catchUpOnStart}
                         onValueChange={(v: boolean) => { settings.catchUpOnStart = v; }}
                     />
-                    <Row
-                        label="Periodic re-scan"
-                        subLabel={settings.periodicSweepMs > 0 ? `Every ${formatMs(settings.periodicSweepMs)}` : "Off"}
-                        onPress={() => editNumber("periodicSweepMs", "Periodic re-scan", "milliseconds, 0 to disable")}
-                    />
-                    <Row
-                        label="Ignore tickets older than"
-                        subLabel={formatMs(settings.catchUpMaxAgeMs)}
-                        onPress={() => editNumber("catchUpMaxAgeMs", "Maximum ticket age", "milliseconds")}
-                    />
+                    <NumberSetting setting="periodicSweepMs" label="Periodic re-scan" hint="milliseconds, 0 for off" />
+                    <NumberSetting setting="catchUpMaxAgeMs" label="Ignore tickets older than" hint="milliseconds" />
                 </Group>
 
                 <Group title="Draws and alerts">
@@ -265,21 +269,13 @@ export default function Settings() {
                         onValueChange={(v: boolean) => { settings.autoNavigateOnWin = v; }}
                     />
                     <SwitchRow
-                        label="Warn if a draw closes while you are away"
+                        label="Warn if a draw closes while away"
                         subLabel="Never forfeits your place"
                         value={settings.warnIfAwayOnDraw}
                         onValueChange={(v: boolean) => { settings.warnIfAwayOnDraw = v; }}
                     />
-                    <Row
-                        label="Warning lead time"
-                        subLabel={formatMs(settings.drawWarningLeadMs)}
-                        onPress={() => editNumber("drawWarningLeadMs", "Warning lead time", "milliseconds")}
-                    />
-                    <Row
-                        label="Draw watch window"
-                        subLabel={formatMs(settings.drawWatchWindowMs)}
-                        onPress={() => editNumber("drawWatchWindowMs", "Draw watch window", "milliseconds")}
-                    />
+                    <NumberSetting setting="drawWarningLeadMs" label="Warning lead time" hint="milliseconds" />
+                    <NumberSetting setting="drawWatchWindowMs" label="Draw watch window" hint="milliseconds" />
                 </Group>
 
                 <Group title="Feedback">
@@ -294,17 +290,43 @@ export default function Settings() {
                         value={settings.verboseLogging}
                         onValueChange={(v: boolean) => { settings.verboseLogging = v; }}
                     />
-                    <Row
+                    <SwitchRow
                         label="Reset all settings"
-                        subLabel="Back to defaults"
-                        onPress={() => {
-                            for (const [key, value] of Object.entries(DEFAULTS)) {
-                                (settings as any)[key] = value;
-                            }
-                        }}
+                        subLabel="Turn on to restore every default"
+                        value={false}
+                        onValueChange={confirmReset}
                     />
                 </Group>
             </Container>
         </ScrollView>
     );
+}
+
+/**
+ * A switch rather than a tappable row, so it needs no component beyond the ones
+ * already on this page. The confirmation is still attempted, and if it cannot
+ * open, the reset is abandoned rather than done silently.
+ */
+function confirmReset(on: boolean): void {
+    if (!on) return;
+
+    const reset = () => {
+        for (const [key, value] of Object.entries(DEFAULTS)) (settings as any)[key] = value;
+        toast("TicketAutoQueue: settings reset");
+    };
+
+    try {
+        showConfirmationAlert({
+            title: "Reset TicketAutoQueue?",
+            content: "Every setting goes back to its default, including your category IDs.",
+            confirmText: "Reset",
+            // Kettu passes this straight through as a string; vendetta-types
+            // narrows it to an enum it does not export usefully here.
+            confirmColor: "red" as any,
+            cancelText: "Cancel",
+            onConfirm: reset
+        });
+    } catch {
+        toast("Could not open the confirmation — nothing was reset");
+    }
 }

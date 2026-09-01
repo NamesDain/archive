@@ -12,6 +12,7 @@
 // API from inside the client, so the second tier becomes a modal alert - which is
 // likewise dismissed by hand and can carry the "jump to the ticket" action.
 
+import { logger } from "@vendetta";
 import { findByProps } from "@vendetta/metro";
 import { FluxDispatcher, ReactNative } from "@vendetta/metro/common";
 import { showConfirmationAlert } from "@vendetta/ui/alerts";
@@ -85,11 +86,23 @@ export function alertWithJump(
         ReactNative?.Vibration?.vibrate?.(400);
     } catch { /* a device that cannot vibrate still gets the modal */ }
 
-    showConfirmationAlert({
-        title,
-        content,
-        confirmText: "Open ticket",
-        cancelText: "Dismiss",
-        onConfirm: () => openChannel(guildId, channelId)
-    });
+    // Never let this throw. Both callers fire at the moment something was won or
+    // is about to be lost, and Discord's alert components have already proved
+    // unreliable on this platform once - the legacy alert the input dialog used
+    // no longer exists at all. A toast is worth less than a modal, but crashing
+    // the app the instant a ticket is assigned to you is worth far less than both.
+    try {
+        showConfirmationAlert({
+            title,
+            content,
+            confirmText: "Open ticket",
+            cancelText: "Dismiss",
+            onConfirm: () => openChannel(guildId, channelId)
+        });
+    } catch (err) {
+        logger.error("Could not show the alert; falling back to a toast:", err);
+        try {
+            showToast(`${title}: ${content}`, assetId("Check", "ic_check_24px", "check"));
+        } catch { /* nothing left to try */ }
+    }
 }
