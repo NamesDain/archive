@@ -1,22 +1,20 @@
-name: Build and deploy
+name: Build and test
+
+# Publishing does NOT happen here. GitHub Pages serves docs/ straight from the
+# branch, so the plugin ships without an Actions runner ever starting - which is
+# why the deploy job that used to live in this file is gone. This workflow only
+# checks the committed output is honest: built from the current sources, and
+# still loadable the way Kettu's loader loads it.
 
 on:
   push:
     branches: [main]
-  # Validates a PR before it lands. Only the build job runs here - deploying from
-  # an unmerged branch would publish it to everyone who has the plugin installed.
   pull_request:
     branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
-
-concurrency:
-  group: pages
-  cancel-in-progress: true
 
 jobs:
   build:
@@ -38,18 +36,14 @@ jobs:
       # bundle that will not evaluate on device fails here instead.
       - run: npm test
 
-      - uses: actions/upload-pages-artifact@v3
-        if: github.event_name != 'pull_request'
-        with:
-          path: dist
-
-  deploy:
-    needs: build
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4
+      # npm test rebuilds and re-mirrors into docs/. If that leaves the working
+      # tree dirty, the committed copy Pages is serving was built from different
+      # sources than the ones in this commit - people would install a stale
+      # plugin and nothing else would say so.
+      - name: docs/ is in sync with the sources
+        run: |
+          if ! git diff --quiet -- docs; then
+            echo "::error::docs/ is stale. Run 'npm run build' and commit the result."
+            git diff --stat -- docs
+            exit 1
+          fi

@@ -9,16 +9,26 @@ expose the same API.
 
 ## Install
 
-Settings → Plugins → **+** → paste:
+One-time repo setup: **Settings → Pages → Source: Deploy from a branch**, branch `main`,
+folder **`/docs`**. Save, then give it a minute to publish.
+
+Then in the app, **Settings → Plugins → +** and paste:
 
 ```
-https://<your-github-username>.github.io/archive/ticketautoqueue/
+https://namesdain.github.io/archive/ticketautoqueue/
 ```
 
 The trailing slash matters — the loader appends `manifest.json` to it.
 
-Push to `main` and the included workflow builds and publishes to GitHub Pages; enable Pages
-for the repo with source **GitHub Actions** first.
+The built plugin is committed under `docs/`, and Pages serves that folder directly. No
+GitHub Actions runner is involved in publishing, so the plugin ships whether or not CI can
+run. `npm run build` refreshes `docs/`; commit it and Pages picks it up on push.
+
+### Installing without GitHub at all
+
+The loader only needs `manifest.json` and `index.js` reachable over HTTPS from one
+directory. Run `npm install && npm run build` and host `docs/ticketautoqueue/` anywhere
+that serves static files.
 
 ## Setup
 
@@ -91,6 +101,12 @@ npm install
 npm run typecheck
 npm test        # builds, then runs the suite against dist/
 ```
+
+`npm run build` writes two copies of the same output: `dist/` (gitignored, what the tests
+load) and `docs/` (committed, what Pages serves). **Commit `docs/` whenever the plugin
+changes** — otherwise installed copies keep the old build, since the `hash` in
+`manifest.json` is what tells them they are out of date. CI fails the build if `docs/` is
+stale against the sources.
 
 The suite loads the built bundle and evaluates it through the same
 `vendetta => { return <bundle> }` wrapper Kettu's loader uses, against a mock client
