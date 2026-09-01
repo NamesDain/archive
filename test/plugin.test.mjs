@@ -706,3 +706,54 @@ describe("the mobile store's key spelling", () => {
         c.plugin.onUnload();
     });
 });
+
+describe("what a press actually claims", () => {
+    // Discord answers /interactions as soon as it accepts the press for delivery.
+    // A 204 does not mean the bot handled it - a panel can still show "This
+    // interaction failed" afterwards. Saying "joined the queue" on that basis told
+    // an operator they were in a queue they were not in.
+    it("reports sending the press, not joining the queue", async () => {
+        const c = loadConfigured();
+
+        dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
+            message: makeTicketPanel({ id: "950", channelId: TICKET_CHANNEL_ID, botId: BOT_ID })
+        });
+        await settle();
+
+        assert.equal(c.calls.toasts.length, 1, "one toast per press");
+        const text = c.calls.toasts[0].content;
+        assert.match(text, /Pressed/, "the toast must describe what was done");
+        assert.doesNotMatch(text, /Joined queue/i, "it must not claim a join it cannot know about");
+        c.plugin.onUnload();
+    });
+
+    it("reports whether a gateway session is held, without printing it", () => {
+        const c = loadConfigured();
+
+        c.registeredCommands[0].execute(
+            [{ name: "action", value: "status" }],
+            { channel: { id: TICKET_CHANNEL_ID } }
+        );
+
+        const report = c.calls.botMessages.at(-1).content;
+        assert.match(report, /\*\*Gateway session:\*\* held via CONNECTION_OPEN/);
+        assert.doesNotMatch(report, /sess-abc/, "the session id is a live credential, never printed whole");
+        c.plugin.onUnload();
+    });
+
+    it("says plainly when no session is held, since no press can work", () => {
+        const mock = createMockVendetta();
+        const plugin = evalPlugin(BUNDLE, mock.vendetta);
+        plugin.onLoad();
+        Object.assign(mock.storage, { categoryIds: CATEGORY_ID, ticketBotId: BOT_ID });
+        // No CONNECTION_OPEN dispatched, so nothing ever supplied a session.
+
+        plugin.settings && mock.registeredCommands[0].execute(
+            [{ name: "action", value: "status" }],
+            { channel: { id: TICKET_CHANNEL_ID } }
+        );
+
+        assert.match(mock.calls.botMessages.at(-1).content, /NONE — presses cannot work/);
+        plugin.onUnload();
+    });
+});
