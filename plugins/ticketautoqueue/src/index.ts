@@ -17,7 +17,7 @@ import {
     allow, gateStatus, isOperatorActive, noteActivity, release, reserve, resetGates,
     startActivityTracking, stopActivityTracking, withinActiveHours
 } from "./gates";
-import { collectButtons, matchTicket } from "./matcher";
+import { collectButtons, customIdOf, matchTicket } from "./matcher";
 import { forgetSessionId, rememberSessionId } from "./session";
 import { initSettings, parseIdList, parseLabelList, settings, ticketBotId } from "./settings";
 import Settings from "./Settings";
@@ -330,7 +330,14 @@ function testReport(channelId: string): string {
         "",
         `**Author:** \`${withButtons.author?.id}\` (${withButtons.author?.username ?? "?"}) ${authorOk ? "(matches)" : "**(does NOT match configured bot)**"}`,
         `**Buttons found (${buttons.length}):**`,
-        ...buttons.map(b => `- \`${String(b.label ?? "<no label>")}\` style=${b.style} disabled=${!!b.disabled} custom_id=\`${b.custom_id ?? "none"}\``),
+        ...buttons.map(b => [
+            `- \`${String(b.label ?? "<no label>")}\` style=${b.style} disabled=${!!b.disabled}`,
+            `  custom_id=\`${customIdOf(b) ?? "none"}\``,
+            // The field names this build actually uses. When a button reads as
+            // having no custom_id, this is what says whether it is spelled
+            // differently or genuinely absent.
+            `  keys=\`${Object.keys(b).join(", ")}\``
+        ].join("\n")),
         "",
         match.ok
             ? `**Result:** would press **${match.target.label}**`

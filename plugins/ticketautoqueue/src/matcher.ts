@@ -51,24 +51,47 @@ export function collectButtons(components: unknown): any[] {
     return out;
 }
 
+/**
+ * A component's custom_id, whichever spelling this build stores it under.
+ *
+ * The mobile client normalises some snake_case gateway keys to camelCase on the
+ * way into its stores. `/taq test` on a real ticket reported a live, enabled,
+ * non-link button with "custom_id=none" while label, style and disabled all read
+ * fine - and those three are the only single-word keys in that set. A non-link
+ * button cannot legally lack the field, so it is present under the other name.
+ * Raw REST responses keep snake_case, so both have to be accepted.
+ */
+export function customIdOf(node: any): string | undefined {
+    const id = node?.custom_id ?? node?.customId;
+    return typeof id === "string" && id !== "" ? id : undefined;
+}
+
+/** Same normalisation problem, same fix. */
+export function applicationIdOf(message: any): string | undefined {
+    const id = message?.application_id ?? message?.applicationId ?? message?.author?.id;
+    return id ? String(id) : undefined;
+}
+
 function isPressable(btn: any, labels: string[]): boolean {
     if (btn.disabled) return false;
     if (btn.style === LINK_STYLE) return false;
-    if (!btn.custom_id) return false;
+    if (!customIdOf(btn)) return false;
     const label = String(btn.label ?? "").trim().toLowerCase();
     return label !== "" && labels.includes(label);
 }
 
 export function matchTicket(message: any): MatchResult {
-    if (!message?.channel_id) return { ok: false, reason: "no channel_id on message" };
+    const channelId = message?.channel_id ?? message?.channelId;
+    if (!channelId) return { ok: false, reason: "no channel_id on message" };
 
     const categories = parseIdList(settings.categoryIds);
     if (categories.size === 0) return { ok: false, reason: "no categoryIds configured" };
 
-    const channel = getChannel(message.channel_id);
+    const channel = getChannel(String(channelId));
     if (!channel) return { ok: false, reason: "channel not in store" };
-    if (!channel.parent_id || !categories.has(String(channel.parent_id))) {
-        return { ok: false, reason: `category ${channel.parent_id ?? "none"} not watched` };
+    const parentId = channel.parent_id ?? channel.parentId;
+    if (!parentId || !categories.has(String(parentId))) {
+        return { ok: false, reason: `category ${parentId ?? "none"} not watched` };
     }
 
     const pattern = parsePattern(settings.channelNamePattern);
@@ -87,16 +110,16 @@ export function matchTicket(message: any): MatchResult {
     const button = collectButtons(message.components).find(b => isPressable(b, labels));
     if (!button) return { ok: false, reason: "no matching enabled button with a custom_id" };
 
-    const applicationId = message.application_id ?? message.author?.id;
+    const applicationId = applicationIdOf(message);
     if (!applicationId) return { ok: false, reason: "could not resolve application_id" };
 
     return {
         ok: true,
         target: {
-            channelId: String(message.channel_id),
-            guildId: String(channel.guild_id),
+            channelId: String(channelId),
+            guildId: String(channel.guild_id ?? channel.guildId),
             messageId: String(message.id),
-            customId: button.custom_id,
+            customId: customIdOf(button)!,
             applicationId: String(applicationId),
             messageFlags: message.flags ?? 0,
             channelName: channel.name ?? "",

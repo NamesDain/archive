@@ -193,7 +193,13 @@ export function makeChannel({ id, name, parentId, guildId = "999999999999999999"
     return { id, name, parent_id: parentId, guild_id: guildId };
 }
 
-export function makeTicketPanel({ id, channelId, botId, label = "Join Queue", customId = "join_claim_queue:1" }) {
+/**
+ * @param {object} o
+ * @param {"snake"|"camel"} [o.idKey] which spelling the client stored custom_id
+ *   under. Mobile normalises it to camelCase; gateway and REST payloads keep
+ *   snake_case, so the plugin has to read a panel either way.
+ */
+export function makeTicketPanel({ id, channelId, botId, label = "Join Queue", customId = "join_claim_queue:1", idKey = "snake" }) {
     return {
         id,
         channel_id: channelId,
@@ -206,7 +212,15 @@ export function makeTicketPanel({ id, channelId, botId, label = "Join Queue", cu
                 type: 17,
                 components: [
                     { type: 10, content: "A new ticket is open. Selection ends <t:9999999999:R>" },
-                    { type: 1, components: [{ type: 2, style: 1, label, custom_id: customId }] }
+                    {
+                        type: 1,
+                        components: [{
+                            type: 2,
+                            style: 1,
+                            label,
+                            ...(idKey === "camel" ? { customId } : { custom_id: customId })
+                        }]
+                    }
                 ]
             }
         ]

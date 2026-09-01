@@ -601,3 +601,108 @@ describe("the sweep", () => {
         c.plugin.onUnload();
     });
 });
+
+describe("the mobile store's key spelling", () => {
+    // A real /taq test on a device reported an enabled, non-link button with
+    // "custom_id=none" while label, style and disabled all read fine. Those three
+    // are the only single-word keys in that set; the client had normalised
+    // custom_id to customId. Reading one spelling only made every panel unmatchable.
+    it("presses a panel whose custom_id is stored as camelCase", async () => {
+        const c = loadConfigured();
+
+        dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
+            message: makeTicketPanel({
+                id: "900", channelId: TICKET_CHANNEL_ID, botId: BOT_ID, idKey: "camel"
+            })
+        });
+        await settle();
+
+        const interaction = c.calls.rest.find(r => r.url === "/interactions");
+        assert.ok(interaction, "a camelCase custom_id must still match and press");
+        assert.equal(
+            interaction.body.data.custom_id,
+            "join_claim_queue:1",
+            "the wire format stays snake_case whatever the store used"
+        );
+        c.plugin.onUnload();
+    });
+
+    it("still presses a panel using the raw snake_case spelling", async () => {
+        const c = loadConfigured();
+
+        dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
+            message: makeTicketPanel({
+                id: "901", channelId: TICKET_CHANNEL_ID, botId: BOT_ID, idKey: "snake"
+            })
+        });
+        await settle();
+
+        assert.ok(c.calls.rest.find(r => r.url === "/interactions"), "REST payloads keep snake_case");
+        c.plugin.onUnload();
+    });
+
+    it("recognises a live draw panel whose Leave button uses camelCase", async () => {
+        const c = loadConfigured();
+        dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
+            message: makeTicketPanel({ id: "902", channelId: TICKET_CHANNEL_ID, botId: BOT_ID })
+        });
+        await settle();
+
+        // The open panel lists everyone queued, us included, and keeps its Leave
+        // button. Only the panel branch reads the countdown off it and adopts that
+        // as the draw's deadline; an unreadable Leave button falls through to
+        // "unrecognised" and leaves the default watch window in place. Asserting
+        // on the adopted deadline is what separates those two, where asserting
+        // "raised no alert" would pass either way.
+        dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
+            message: {
+                id: "903",
+                channel_id: TICKET_CHANNEL_ID,
+                author: { id: BOT_ID },
+                content: "",
+                components: [{
+                    type: 17,
+                    components: [
+                        { type: 10, content: `In queue: <@${SELF_ID}> - ends <t:9999999999:R>` },
+                        { type: 1, components: [{ type: 2, style: 4, label: "Leave Queue", customId: "leave_claim_queue:1" }] }
+                    ]
+                }]
+            }
+        });
+
+        assert.equal(c.calls.alerts.length, 0, "an open panel is never a win");
+
+        c.registeredCommands[0].execute(
+            [{ name: "action", value: "status" }],
+            { channel: { id: TICKET_CHANNEL_ID } }
+        );
+        const status = c.calls.botMessages.at(-1).content;
+        const secondsLeft = Number(/ticket-0001 \((\d+)s left\)/.exec(status)?.[1]);
+
+        assert.ok(
+            secondsLeft > 100000,
+            `expected the panel's own countdown to be adopted, got ${secondsLeft}s ` +
+            "(the 600s default means the Leave button was never read)"
+        );
+        c.plugin.onUnload();
+    });
+
+    it("reports the button's real key names in /taq test", () => {
+        const c = loadConfigured();
+        const panel = makeTicketPanel({
+            id: "904", channelId: TICKET_CHANNEL_ID, botId: BOT_ID, idKey: "camel"
+        });
+        c.stores.MessageStore._messages.set(TICKET_CHANNEL_ID, { _array: [panel] });
+
+        c.registeredCommands[0].execute(
+            [{ name: "action", value: "test" }],
+            { channel: { id: TICKET_CHANNEL_ID } }
+        );
+
+        const report = c.calls.botMessages[0].content;
+        assert.match(report, /keys=/, "the report must name the fields this build actually uses");
+        assert.match(report, /customId/, "so a wrong guess about the spelling is visible immediately");
+        assert.match(report, /would press \*\*Join Queue\*\*/);
+        c.plugin.onUnload();
+    });
+});
