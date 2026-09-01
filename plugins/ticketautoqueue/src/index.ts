@@ -35,10 +35,22 @@ let reconnectSweepTimer: ReturnType<typeof setTimeout> | null = null;
 let awayCheckTimer: ReturnType<typeof setInterval> | null = null;
 let unregisterCommand: (() => void) | null = null;
 let lastAutoSweepAt = 0;
+// Cleared whenever the app wakes - a reconnect or a return to the foreground -
+// so that wake is allowed one sweep regardless of how recently one ran.
+let sweptSinceWake = true;
+let foregroundSweepTimer: ReturnType<typeof setTimeout> | null = null;
 
-// Guild channels and the message store fill in asynchronously after a connection opens,
-// so an immediate sweep would see a partial channel list and report false "no candidates".
+// Guild channels and the message store fill in asynchronously after a connection
+// opens, so an immediate sweep would see a partial channel list.
+//
+// A cold start can afford to wait for that. A wake cannot: the app was suspended,
+// the draw on anything opened meanwhile closes in about a minute, and waiting a
+// quarter of that window before looking is how a ticket gets joined late or not
+// at all. The sweep no longer depends on a warm store anyway - it lists channels
+// from REST when the store has none, and hands each record to the matcher - so
+// the wake path only pauses long enough for the reconnect to settle.
 const STORE_SETTLE_MS = 15000;
+const WAKE_SETTLE_MS = 3000;
 
 // One floor for every automatic trigger. Startup, reconnect and the periodic tick can
 // all come due at once - on a fresh launch they always do - and this collapses them
@@ -206,7 +218,15 @@ async function autoSweep(reason: string) {
         return;
     }
 
-    if (Date.now() - lastAutoSweepAt < AUTO_SWEEP_MIN_GAP_MS) return;
+    // The gap floor collapses startup, reconnect and the periodic tick when they
+    // all come due at once. It must not also swallow the one sweep that follows
+    // waking up: on mobile the gateway drops on every app switch, so a recent
+    // sweep from the previous wake would suppress exactly the scan that matters.
+    // One sweep per wake is let through; everything after it obeys the floor.
+    const withinGap = Date.now() - lastAutoSweepAt < AUTO_SWEEP_MIN_GAP_MS;
+    if (withinGap && sweptSinceWake) return;
+
+    sweptSinceWake = true;
     lastAutoSweepAt = Date.now();
 
     try {
@@ -279,9 +299,27 @@ function onConnectionOpen(event: any) {
 
         if (!settings.sweepOnReconnect) return;
         if (reconnectSweepTimer !== null) clearTimeout(reconnectSweepTimer);
-        reconnectSweepTimer = setTimeout(() => void autoSweep("reconnect"), STORE_SETTLE_MS);
+        sweptSinceWake = false;
+        reconnectSweepTimer = setTimeout(() => void autoSweep("reconnect"), WAKE_SETTLE_MS);
     } catch (err) {
         logger.error("CONNECTION_OPEN handler threw:", err);
+    }
+}
+
+/**
+ * Returning to the app is the other half of the wake path. The gateway does not
+ * always drop on a short backgrounding, so waiting for CONNECTION_OPEN alone can
+ * mean nothing ever re-scans - which shows up as a ticket that was never joined
+ * even though the app was open again well before its draw closed.
+ */
+function onReturnedToForeground(): void {
+    try {
+        if (!settings.sweepOnReconnect) return;
+        sweptSinceWake = false;
+        if (foregroundSweepTimer !== null) clearTimeout(foregroundSweepTimer);
+        foregroundSweepTimer = setTimeout(() => void autoSweep("foreground"), WAKE_SETTLE_MS);
+    } catch (err) {
+        logger.error("Foreground handler threw:", err);
     }
 }
 
@@ -380,7 +418,7 @@ export default {
         initSettings();
         resetInteractionWatch();
         startInteractionWatch();
-        startActivityTracking();
+        startActivityTracking(onReturnedToForeground);
 
         FluxDispatcher.subscribe("MESSAGE_CREATE", onMessageCreate);
         FluxDispatcher.subscribe("MESSAGE_UPDATE", onMessageUpdate);
@@ -451,6 +489,8 @@ export default {
         startSweepTimer = null;
         if (reconnectSweepTimer !== null) clearTimeout(reconnectSweepTimer);
         reconnectSweepTimer = null;
+        if (foregroundSweepTimer !== null) clearTimeout(foregroundSweepTimer);
+        foregroundSweepTimer = null;
         if (awayCheckTimer !== null) clearInterval(awayCheckTimer);
         awayCheckTimer = null;
 

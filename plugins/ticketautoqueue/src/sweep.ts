@@ -96,11 +96,11 @@ async function watchedChannels(): Promise<any[]> {
  * `after: 0` returns the channel's oldest messages. The ticket panel is posted first,
  * so a newest-first fetch would miss it on any ticket with a page of chatter.
  */
-async function panelMessages(channelId: string): Promise<{ messages: any[]; hitNetwork: boolean; }> {
+async function panelMessages(channelId: string, channel: any): Promise<{ messages: any[]; hitNetwork: boolean; }> {
     // The panel is often already cached from simply having the channel open, and a
     // sweep issues one request per watched channel, so skipping the request when the
     // answer is already local is the difference between a burst and a trickle.
-    const cachedPanel = cachedMessages(channelId).filter(m => matchTicket(m).ok);
+    const cachedPanel = cachedMessages(channelId).filter(m => matchTicket(m, channel).ok);
     if (cachedPanel.length) return { messages: cachedPanel, hitNetwork: false };
 
     const res = await withRateLimitRetry<any>(`fetch #${channelId}`, () => RestAPI().get({
@@ -142,7 +142,7 @@ export async function sweepOpenTickets(): Promise<SweepStats> {
             let messages: any[];
             let hitNetwork: boolean;
             try {
-                ({ messages, hitNetwork } = await panelMessages(channel.id));
+                ({ messages, hitNetwork } = await panelMessages(channel.id, channel));
             } catch (err) {
                 stats.skipped++;
                 const cached = noteUnreachable(channel.id, (err as any)?.status);
@@ -154,7 +154,7 @@ export async function sweepOpenTickets(): Promise<SweepStats> {
             let pressed = false;
             let expired = false;
             for (const message of messages) {
-                const match = matchTicket(message);
+                const match = matchTicket(message, channel);
                 if (!match.ok) continue;
 
                 // A sweep looks back an hour, but a draw closes in about a minute. Pressing
