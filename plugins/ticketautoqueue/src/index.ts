@@ -14,9 +14,10 @@ import { press } from "./clicker";
 import { cachedMessages, getChannel, getCurrentUserId, MessageStore, sendBotMessage } from "./discord";
 import { clearDraws, drawsNeedingAlert, markAlerted, observeDraw, pendingDraws, trackDraw } from "./draws";
 import {
-    allow, gateStatus, isOperatorActive, noteActivity, release, reserve, resetGates,
-    startActivityTracking, stopActivityTracking, withinActiveHours
+    allow, gateStatus, isOperatorActive, noteActivity, noteRejection, rejectionCount, release,
+    reserve, resetGates, startActivityTracking, stopActivityTracking, withinActiveHours
 } from "./gates";
+import { outcomeReportingSeen, resetInteractionWatch, startInteractionWatch, stopInteractionWatch } from "./interactions";
 import { collectButtons, customIdOf, matchTicket } from "./matcher";
 import { forgetSessionId, rememberSessionId, sessionStatus } from "./session";
 import { initSettings, parseIdList, parseLabelList, settings, ticketBotId } from "./settings";
@@ -95,7 +96,20 @@ async function handleMessage(message: any, source: string, retriesLeft = 2) {
     reserve(target.channelId);
 
     const result = await press(target);
-    if (result !== "sent") {
+
+    if (result === "rejected") {
+        // The bot took the interaction and did nothing with it - the same failure a
+        // manual tap hits on these tickets. Hand the slot back so a later panel edit
+        // can try again, but count it: the gate stops after a couple of rounds so one
+        // broken ticket cannot keep firing interactions for as long as it stays open.
+        release(target.channelId);
+        const rounds = noteRejection(target.channelId);
+        logger.error(`The bot ignored every press in #${target.channelName} (round ${rounds})`);
+        toastFailure(`Bot did not respond: #${target.channelName}`);
+        return;
+    }
+
+    if (result !== "joined" && result !== "sent") {
         release(target.channelId);
         logger.error(`Failed to press "${target.label}" in #${target.channelName} (${result})`);
         toastFailure(`TicketAutoQueue: failed on #${target.channelName}`);
@@ -103,7 +117,9 @@ async function handleMessage(message: any, source: string, retriesLeft = 2) {
     }
 
     trackDraw(target.channelId, target.channelName, settings.drawWatchWindowMs);
-    toastSuccess(`Pressed Join Queue: #${target.channelName}`);
+    toastSuccess(result === "joined"
+        ? `Joined queue: #${target.channelName}`
+        : `Pressed Join Queue: #${target.channelName}`);
 }
 
 function handleDraw(message: any, source: string) {
@@ -299,6 +315,13 @@ function statusReport(): string {
     const sinceSweep = lastAutoSweepAt ? `${Math.round((Date.now() - lastAutoSweepAt) / 1000)}s ago` : "never";
     lines.push(`**Auto sweep:** ${period > 0 ? `every ${Math.round(Math.max(AUTO_SWEEP_MIN_GAP_MS, period) / 1000)}s` : "off"}, on reconnect ${settings.sweepOnReconnect ? "on" : "off"} - last ran ${sinceSweep}`);
 
+    lines.push(`**Press confirmation:** ${outcomeReportingSeen()
+        ? "on — a join is only reported once the client confirms it"
+        : "_not seen yet on this build; presses report as sent, not joined_"}`);
+
+    const givenUp = rejectionCount();
+    if (givenUp > 0) lines.push(`**Given up on:** ${givenUp} ticket(s) the bot would not accept`);
+
     const unreadable = unreachableCount();
     if (unreadable > 0) lines.push(`**Unreadable channels:** ${unreadable} _(cached, not retried this hour)_`);
 
@@ -355,6 +378,8 @@ function testReport(channelId: string): string {
 export default {
     onLoad() {
         initSettings();
+        resetInteractionWatch();
+        startInteractionWatch();
         startActivityTracking();
 
         FluxDispatcher.subscribe("MESSAGE_CREATE", onMessageCreate);
@@ -432,6 +457,7 @@ export default {
         unregisterCommand?.();
         unregisterCommand = null;
 
+        stopInteractionWatch();
         stopActivityTracking();
         resetGates();
         clearDraws();

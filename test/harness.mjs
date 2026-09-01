@@ -53,6 +53,16 @@ export function createMockVendetta({ modernComponents = true } = {}) {
         }
     };
 
+    // How the client answers each interaction, consumed in order. "joined" and
+    // "rejected" dispatch the matching outcome event; "silent" dispatches nothing,
+    // standing in for a build that never reports outcomes.
+    //
+    // Defaults to "joined" because that is the healthy case and it resolves at
+    // once; leaving it silent would make every press in every test sit out the
+    // full outcome timeout.
+    const interactionOutcomes = [];
+    const nextOutcome = () => (interactionOutcomes.length ? interactionOutcomes.shift() : "joined");
+
     const RestAPI = {
         async get(options) {
             calls.rest.push({ method: "get", ...options });
@@ -60,7 +70,20 @@ export function createMockVendetta({ modernComponents = true } = {}) {
         },
         async post(options) {
             calls.rest.push({ method: "post", ...options });
-            return { body: {} };
+
+            if (options?.url === "/interactions") {
+                const outcome = nextOutcome();
+                const nonce = options.body?.nonce;
+                if (outcome === "joined" || outcome === "rejected") {
+                    // The real client dispatches this a moment after the request.
+                    setTimeout(() => {
+                        const event = outcome === "joined" ? "INTERACTION_SUCCESS" : "INTERACTION_FAILURE";
+                        for (const handler of fluxHandlers.get(event) ?? []) handler({ nonce });
+                    }, 1);
+                }
+            }
+
+            return { body: {}, status: 204 };
         },
         async del(options) {
             calls.rest.push({ method: "del", ...options });
@@ -174,7 +197,7 @@ export function createMockVendetta({ modernComponents = true } = {}) {
         }
     };
 
-    return { vendetta, calls, fluxHandlers, registeredCommands, storage, stores, AppState, RestAPI };
+    return { vendetta, calls, fluxHandlers, registeredCommands, storage, stores, AppState, RestAPI, interactionOutcomes };
 }
 
 /** Evaluates a built bundle exactly the way Kettu's VdPluginManager does. */

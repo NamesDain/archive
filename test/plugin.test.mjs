@@ -49,6 +49,9 @@ function loadConfigured(overrides = {}) {
 
 const settle = () => new Promise(r => setTimeout(r, 60));
 
+/** A press nothing confirms waits out the full outcome timeout before reporting. */
+const silentPress = () => new Promise(r => setTimeout(r, 4600));
+
 /**
  * Renders an element tree, invoking function components as it goes.
  *
@@ -712,13 +715,14 @@ describe("what a press actually claims", () => {
     // A 204 does not mean the bot handled it - a panel can still show "This
     // interaction failed" afterwards. Saying "joined the queue" on that basis told
     // an operator they were in a queue they were not in.
-    it("reports sending the press, not joining the queue", async () => {
+    it("reports sending the press, not joining the queue, when nothing confirms it", async () => {
         const c = loadConfigured();
+        c.interactionOutcomes.push("silent");
 
         dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
             message: makeTicketPanel({ id: "950", channelId: TICKET_CHANNEL_ID, botId: BOT_ID })
         });
-        await settle();
+        await silentPress();
 
         assert.equal(c.calls.toasts.length, 1, "one toast per press");
         const text = c.calls.toasts[0].content;
@@ -755,5 +759,87 @@ describe("what a press actually claims", () => {
 
         assert.match(mock.calls.botMessages.at(-1).content, /NONE — presses cannot work/);
         plugin.onUnload();
+    });
+});
+
+describe("a bot that drops presses", () => {
+    // The ticket bot ignores interactions on some tickets - manual taps fail the
+    // same way - so a single dropped press used to lose the ticket outright.
+    // One attempt resolves at once; each retry waits RETRY_DELAY_MS (1200ms).
+    const afterRetries = (rounds = 1) => new Promise(r => setTimeout(r, 1200 * 3 * rounds + 600));
+
+    it("retries and reports a real join once the client confirms one", async () => {
+        const c = loadConfigured();
+        c.interactionOutcomes.push("rejected", "joined");
+
+        dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
+            message: makeTicketPanel({ id: "970", channelId: TICKET_CHANNEL_ID, botId: BOT_ID })
+        });
+        await afterRetries();
+
+        const presses = c.calls.rest.filter(r => r.url === "/interactions");
+        assert.equal(presses.length, 2, "a dropped press must be retried");
+        assert.notEqual(presses[0].body.nonce, presses[1].body.nonce, "each attempt needs its own nonce");
+        assert.match(c.calls.toasts.at(-1).content, /Joined queue/, "a confirmed join may say so");
+        c.plugin.onUnload();
+    });
+
+    it("gives up after a bounded number of attempts", async () => {
+        const c = loadConfigured();
+        c.interactionOutcomes.push("rejected", "rejected", "rejected");
+
+        dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
+            message: makeTicketPanel({ id: "971", channelId: TICKET_CHANNEL_ID, botId: BOT_ID })
+        });
+        await afterRetries();
+
+        assert.equal(
+            c.calls.rest.filter(r => r.url === "/interactions").length,
+            3,
+            "three attempts, then stop - the draw closes in about a minute"
+        );
+        assert.match(c.calls.toasts.at(-1).content, /did not respond/i);
+        c.plugin.onUnload();
+    });
+
+    it("stops trying a ticket the bot keeps refusing", async () => {
+        const c = loadConfigured();
+        // Two full rounds of three rejected attempts, then the gate should refuse.
+        for (let i = 0; i < 9; i++) c.interactionOutcomes.push("rejected");
+
+        for (const id of ["980", "981", "982"]) {
+            dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
+                message: makeTicketPanel({ id, channelId: TICKET_CHANNEL_ID, botId: BOT_ID })
+            });
+            await afterRetries();
+        }
+
+        const presses = c.calls.rest.filter(r => r.url === "/interactions").length;
+        assert.equal(presses, 6, `expected two rounds of three then a stop, got ${presses}`);
+
+        c.registeredCommands[0].execute(
+            [{ name: "action", value: "status" }],
+            { channel: { id: TICKET_CHANNEL_ID } }
+        );
+        assert.match(c.calls.botMessages.at(-1).content, /Given up on:\*\* 1 ticket/);
+        c.plugin.onUnload();
+    });
+
+    it("does not retry on a build that never reports outcomes", async () => {
+        const c = loadConfigured();
+        c.interactionOutcomes.push("silent");
+
+        dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
+            message: makeTicketPanel({ id: "972", channelId: TICKET_CHANNEL_ID, botId: BOT_ID })
+        });
+        await silentPress();
+
+        assert.equal(
+            c.calls.rest.filter(r => r.url === "/interactions").length,
+            1,
+            "silence is not evidence the press was dropped; retrying all of them would hammer the bot"
+        );
+        assert.match(c.calls.toasts.at(-1).content, /Pressed/, "and the weaker claim is used");
+        c.plugin.onUnload();
     });
 });

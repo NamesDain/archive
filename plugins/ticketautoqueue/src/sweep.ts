@@ -11,7 +11,7 @@ import { logger } from "@vendetta";
 import { press } from "./clicker";
 import { cachedMessages, fetchGuildChannels, getChannel, listGuildChannels, RestAPI } from "./discord";
 import { deadlinePassed, trackDraw } from "./draws";
-import { allow, release, reserve } from "./gates";
+import { allow, noteRejection, release, reserve } from "./gates";
 import { matchTicket } from "./matcher";
 import { withRateLimitRetry } from "./net";
 import { parseIdList, settings } from "./settings";
@@ -171,12 +171,13 @@ export async function sweepOpenTickets(): Promise<SweepStats> {
                 reserve(target.channelId);
 
                 const result = await press(target);
-                if (result === "sent") {
+                if (result === "joined" || result === "sent") {
                     stats.joined++;
                     trackDraw(target.channelId, target.channelName, settings.drawWatchWindowMs);
-                    logger.info(`[SWEEP] sent "${target.label}" press in #${target.channelName}`);
+                    logger.info(`[SWEEP] ${result === "joined" ? "joined" : "sent press for"} "${target.label}" in #${target.channelName}`);
                 } else {
                     release(target.channelId);
+                    if (result === "rejected") noteRejection(target.channelId);
                     stats.failed++;
                     logger.error(`[SWEEP] failed to press "${target.label}" in #${target.channelName} (${result})`);
                 }
