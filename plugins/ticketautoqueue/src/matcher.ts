@@ -80,14 +80,22 @@ function isPressable(btn: any, labels: string[]): boolean {
     return label !== "" && labels.includes(label);
 }
 
-export function matchTicket(message: any): MatchResult {
+/**
+ * @param knownChannel the channel record, when the caller already holds one.
+ *
+ * A sweep after waking from suspension is exactly when the channel store is
+ * coldest, and it is also when it lists ticket channels from REST instead. Making
+ * the store the only source turned every one of those into "channel not in store"
+ * - so the REST fallback found the tickets and then could not match any of them.
+ */
+export function matchTicket(message: any, knownChannel?: any): MatchResult {
     const channelId = message?.channel_id ?? message?.channelId;
     if (!channelId) return { ok: false, reason: "no channel_id on message" };
 
     const categories = parseIdList(settings.categoryIds);
     if (categories.size === 0) return { ok: false, reason: "no categoryIds configured" };
 
-    const channel = getChannel(String(channelId));
+    const channel = knownChannel ?? getChannel(String(channelId));
     if (!channel) return { ok: false, reason: "channel not in store" };
     const parentId = channel.parent_id ?? channel.parentId;
     if (!parentId || !categories.has(String(parentId))) {

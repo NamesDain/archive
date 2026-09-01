@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { after, before, describe, it } from "node:test";
 
 import {
-    createMockVendetta, dispatch, evalPlugin, makeChannel, makeTicketPanel
+    createMockVendetta, dispatch, evalPlugin, makeChannel, makeTicketPanel, snowflakeNow
 } from "./harness.mjs";
 
 const BUNDLE = await readFile("./dist/ticketautoqueue/index.js", "utf8");
@@ -840,6 +840,92 @@ describe("a bot that drops presses", () => {
             "silence is not evidence the press was dropped; retrying all of them would hammer the bot"
         );
         assert.match(c.calls.toasts.at(-1).content, /Pressed/, "and the weaker claim is used");
+        c.plugin.onUnload();
+    });
+});
+
+describe("catching up after the app was suspended", () => {
+    // iOS stops JS and drops the gateway while the app is backgrounded, so a
+    // ticket opened meanwhile produces no event at all. Coming back is the only
+    // chance to catch it, and its draw closes in about a minute.
+    const afterWakeSweep = () => new Promise(r => setTimeout(r, 3600));
+
+    /**
+     * A watched, freshly created ticket channel the channel store does NOT know,
+     * reachable only by listing the guild over REST - the state right after a wake.
+     */
+    function ticketOnlyKnownToRest(c) {
+        const freshId = snowflakeNow();
+        c.stores.GuildChannelStore._byGuild.clear();
+        c.RestAPI.get = async options => {
+            c.calls.rest.push({ method: "get", ...options });
+            if (options.url === `/guilds/${GUILD_ID}/channels`) {
+                return { body: [makeChannel({
+                    id: freshId, name: "ticket-0009", parentId: CATEGORY_ID, guildId: GUILD_ID
+                })] };
+            }
+            if (options.url.startsWith(`/channels/${freshId}/messages`)) {
+                return { body: [makeTicketPanel({ id: "990", channelId: freshId, botId: BOT_ID })] };
+            }
+            return { body: [] };
+        };
+        return freshId;
+    }
+
+    it("sweeps when the app returns to the foreground, not only on reconnect", async () => {
+        const c = loadConfigured();
+        ticketOnlyKnownToRest(c);
+
+        // No CONNECTION_OPEN here: a short backgrounding often keeps the gateway,
+        // so waiting for a reconnect alone would never re-scan.
+        c.AppState.currentState = "active";
+        for (const handler of c.AppState._handlers) handler("active");
+        await afterWakeSweep();
+
+        assert.ok(
+            c.calls.rest.find(r => r.url === "/interactions"),
+            "returning to the app must trigger a catch-up sweep"
+        );
+        c.plugin.onUnload();
+    });
+
+    it("matches a ticket the store has never heard of", async () => {
+        const c = loadConfigured();
+        ticketOnlyKnownToRest(c);
+        // The store never learns this channel, which is its state right after a wake.
+
+        await c.registeredCommands[0].execute(
+            [{ name: "action", value: "sweep" }],
+            { channel: { id: TICKET_CHANNEL_ID } }
+        );
+        await settle();
+
+        assert.ok(
+            c.calls.rest.find(r => r.url === "/interactions"),
+            "a channel listed from REST must still be matchable"
+        );
+        c.plugin.onUnload();
+    });
+
+    it("lets a wake sweep through even when one ran moments ago", async () => {
+        const c = loadConfigured();
+        ticketOnlyKnownToRest(c);
+
+        // First wake consumes its allowance.
+        dispatch(c.fluxHandlers, "CONNECTION_OPEN", { sessionId: "sess-1" });
+        await afterWakeSweep();
+        const afterFirst = c.calls.rest.filter(r => r.url === `/guilds/${GUILD_ID}/channels`).length;
+        assert.ok(afterFirst >= 1, "the first wake should sweep");
+
+        // A second wake, well inside the 60s gap floor. On mobile this is every
+        // app switch, and the floor used to swallow exactly this scan.
+        dispatch(c.fluxHandlers, "CONNECTION_OPEN", { sessionId: "sess-2" });
+        await afterWakeSweep();
+
+        assert.ok(
+            c.calls.rest.filter(r => r.url === `/guilds/${GUILD_ID}/channels`).length > afterFirst,
+            "a wake must get its own sweep even inside the gap floor"
+        );
         c.plugin.onUnload();
     });
 });

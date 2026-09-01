@@ -35,6 +35,7 @@ let lastActivity = Date.now();
 let lastClick = 0;
 let appStateSubscription: any = null;
 let onChannelSelect: (() => void) | null = null;
+let onForeground: (() => void) | null = null;
 
 /** Anything that means a person is holding the phone and using Discord. */
 export function noteActivity(): void {
@@ -44,10 +45,15 @@ export function noteActivity(): void {
 function onAppStateChange(state: string): void {
     // Only a return to the foreground counts. Going to the background is not
     // activity, and must not refresh the timestamp on the way out.
-    if (state === "active") noteActivity();
+    if (state !== "active") return;
+    noteActivity();
+    // Coming back is the moment anything missed while suspended can be caught:
+    // no events arrive while the OS has the app stopped.
+    onForeground?.();
 }
 
-export function startActivityTracking(): void {
+export function startActivityTracking(onWake?: () => void): void {
+    onForeground = onWake ?? null;
     if (appStateSubscription) return;
     lastActivity = Date.now();
 
@@ -67,6 +73,7 @@ export function stopActivityTracking(): void {
     if (typeof appStateSubscription?.remove === "function") appStateSubscription.remove();
     else AppState?.removeEventListener?.("change", onAppStateChange);
     appStateSubscription = null;
+    onForeground = null;
 
     if (onChannelSelect) {
         FluxDispatcher.unsubscribe("CHANNEL_SELECT", onChannelSelect);

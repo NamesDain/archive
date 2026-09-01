@@ -212,6 +212,18 @@ export function dispatch(fluxHandlers, event, payload) {
     for (const handler of fluxHandlers.get(event) ?? []) handler(payload);
 }
 
+/**
+ * A snowflake encoding "just now".
+ *
+ * Channel age is read straight out of the ID, and the sweep discards anything
+ * older than catchUpMaxAgeMs. A hand-written ID like 444444444444444444 decodes
+ * to 2018, so any test that expects a sweep to consider a channel has to mint a
+ * current one rather than invent digits.
+ */
+export function snowflakeNow(offsetMs = 0) {
+    return String(BigInt(Date.now() + offsetMs - 1420070400000) << 22n);
+}
+
 export function makeChannel({ id, name, parentId, guildId = "999999999999999999" }) {
     return { id, name, parent_id: parentId, guild_id: guildId };
 }
