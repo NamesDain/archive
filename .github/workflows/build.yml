@@ -3,6 +3,10 @@ name: Build and deploy
 on:
   push:
     branches: [main]
+  # Validates a PR before it lands. Only the build job runs here - deploying from
+  # an unmerged branch would publish it to everyone who has the plugin installed.
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -35,11 +39,13 @@ jobs:
       - run: npm test
 
       - uses: actions/upload-pages-artifact@v3
+        if: github.event_name != 'pull_request'
         with:
           path: dist
 
   deploy:
     needs: build
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
