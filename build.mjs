@@ -1,5 +1,5 @@
 import { createHash } from "crypto";
-import { mkdir, readdir, readFile, writeFile } from "fs/promises";
+import { copyFile, mkdir, readdir, readFile, writeFile } from "fs/promises";
 import { extname } from "path";
 
 import commonjs from "@rollup/plugin-commonjs";
@@ -97,6 +97,15 @@ for (const plug of await readdir("./plugins")) {
         manifest.main = "index.js";
         await mkdir(`./dist/${plug}`, { recursive: true });
         await writeFile(`./dist/${plug}/manifest.json`, JSON.stringify(manifest));
+
+        // docs/ is committed and served by GitHub Pages straight from the branch,
+        // which needs no Actions runner - the one part of this repo that has never
+        // managed to get one. dist/ stays gitignored and is what the tests load.
+        // Mirroring here rather than in a separate script keeps the published copy
+        // from silently going stale against the sources.
+        await mkdir(`./docs/${plug}`, { recursive: true });
+        await copyFile(outPath, `./docs/${plug}/index.js`);
+        await writeFile(`./docs/${plug}/manifest.json`, JSON.stringify(manifest));
 
         console.log(`Successfully built ${manifest.name}!`);
     } catch (e) {

@@ -6,188 +6,305 @@
  * Ported from the Vencord plugin of the same name.
  */
 
-// Vencord rendered this page from the settings declaration. Vendetta plugins ship
-// their own component, so the rows are written out by hand here. Every numeric
-// field is a text box - React Native has no number input - and is parsed on commit
-// rather than on keystroke, so a half-deleted value never reaches the gates.
+// Built on Discord's current table components rather than the legacy Forms set.
+// Forms still resolves, but it renders as an unstyled run of rows on modern
+// builds - which is what this page looked like before.
+//
+// Text and numeric settings open an input dialog on tap instead of embedding a
+// field in the row. That reads better on a phone, and it gives each value a
+// place to be validated: showInputAlert keeps the dialog open and shows the
+// message when onConfirm rejects, so a bad category ID or an uncompilable regex
+// is caught at the point of entry rather than silently making the plugin inert.
 
+import { findByProps } from "@vendetta/metro";
 import { React, ReactNative } from "@vendetta/metro/common";
 import { useProxy } from "@vendetta/storage";
+import { showInputAlert } from "@vendetta/ui/alerts";
 import { Forms } from "@vendetta/ui/components";
 
-import { DEFAULTS, parseNumber, settings, TaqSettings } from "./settings";
+import { parseHourWindow } from "./hours";
+import { DEFAULTS, parseIdList, parseLabelList, parsePattern, settings, settingText, TaqSettings, ticketBotId } from "./settings";
 
-const { ScrollView } = ReactNative;
-const { FormSection, FormSwitchRow, FormInput, FormDivider, FormText } = Forms;
+const { ScrollView, View } = ReactNative;
+
+const tables = findByProps("TableRowGroup", "TableSwitchRow");
+
+// Legacy shims, kept only so the page still renders on a build where the table
+// components have moved. They take the same props as the modern ones.
+const LegacyGroup = ({ title, children }: any) =>
+    <Forms.FormSection title={title}>{children}</Forms.FormSection>;
+const LegacySwitchRow = ({ label, subLabel, value, onValueChange }: any) =>
+    <Forms.FormSwitchRow label={label} subLabel={subLabel} value={value} onValueChange={onValueChange} />;
+const LegacyRow = ({ label, subLabel, onPress }: any) =>
+    <Forms.FormRow label={label} subLabel={subLabel} onPress={onPress} />;
+
+const Group = tables?.TableRowGroup ?? LegacyGroup;
+const SwitchRow = tables?.TableSwitchRow ?? LegacySwitchRow;
+const Row = tables?.TableRow ?? LegacyRow;
+
+// Discord's own spacing primitive. A plain View is the fallback rather than a
+// `gap` style, which needs React Native 0.71 and is not in every build here.
+const Stack = findByProps("Stack")?.Stack;
+const Container = Stack ?? View;
+const containerProps: any = {
+    style: { paddingVertical: 16, paddingHorizontal: 12 },
+    ...(Stack ? { spacing: 16 } : {})
+};
 
 type BooleanKey = { [K in keyof TaqSettings]: TaqSettings[K] extends boolean ? K : never }[keyof TaqSettings];
 type StringKey = { [K in keyof TaqSettings]: TaqSettings[K] extends string ? K : never }[keyof TaqSettings];
 type NumberKey = { [K in keyof TaqSettings]: TaqSettings[K] extends number ? K : never }[keyof TaqSettings];
 
-function Switch({ setting, label, subLabel }: { setting: BooleanKey; label: string; subLabel: string; }) {
-    return (
-        <FormSwitchRow
-            label={label}
-            subLabel={subLabel}
-            value={settings[setting]}
-            onValueChange={(v: boolean) => { settings[setting] = v; }}
-        />
-    );
-}
-
-function TextRow({ setting, title, placeholder }: { setting: StringKey; title: string; placeholder?: string; }) {
-    return (
-        <FormInput
-            title={title}
-            placeholder={placeholder}
-            value={settings[setting]}
-            onChange={(v: string) => { settings[setting] = v; }}
-        />
-    );
+/** Durations are stored in milliseconds; nobody wants to read "300000" in a list. */
+function formatMs(ms: number): string {
+    if (!Number.isFinite(ms)) return "not set";
+    if (ms === 0) return "off";
+    if (ms < 1000) return `${ms} ms`;
+    const round = (n: number) => (Number.isInteger(n) ? String(n) : n.toFixed(1));
+    const seconds = ms / 1000;
+    if (seconds < 60) return `${round(seconds)}s`;
+    const minutes = seconds / 60;
+    if (minutes < 60) return `${round(minutes)} min`;
+    return `${round(minutes / 60)} h`;
 }
 
 /**
- * Kept as local text while it is being edited and only written back on blur:
- * committing every keystroke would persist "30" on the way to "30000", and the
- * gate reading it in between would use that value.
+ * showInputAlert closes on a resolved promise and shows the message on a rejected
+ * one. Rejecting rather than throwing is deliberate: it calls onConfirm inside
+ * `Promise.resolve(...)`, so a synchronous throw would escape the press handler
+ * instead of reaching its catch.
  */
-function NumberRow({ setting, title }: { setting: NumberKey; title: string; }) {
-    const [draft, setDraft] = React.useState(String(settings[setting]));
+const invalid = (message: string) => Promise.reject(new Error(message));
 
-    return (
-        <FormInput
-            title={title}
-            keyboardType="numeric"
-            value={draft}
-            onChange={(v: string) => setDraft(v)}
-            onBlur={() => {
-                const parsed = parseNumber(draft, DEFAULTS[setting]);
-                settings[setting] = parsed;
-                setDraft(String(parsed));
-            }}
-        />
-    );
+function editText(
+    key: StringKey,
+    title: string,
+    placeholder: string,
+    validate?: (value: string) => string | null
+) {
+    showInputAlert({
+        title,
+        initialValue: settingText(settings[key]),
+        placeholder,
+        confirmText: "Save",
+        cancelText: "Cancel",
+        onConfirm: (input: string) => {
+            const value = input.trim();
+            const problem = validate?.(value);
+            if (problem) return invalid(problem);
+            settings[key] = value;
+        }
+    });
+}
+
+function editNumber(key: NumberKey, title: string, hint: string) {
+    showInputAlert({
+        title,
+        initialValue: String(settings[key]),
+        placeholder: hint,
+        confirmText: "Save",
+        cancelText: "Cancel",
+        onConfirm: (input: string) => {
+            const value = Number(input.trim());
+            if (!Number.isFinite(value) || value < 0) {
+                return invalid("Enter a number of milliseconds, 0 or higher.");
+            }
+            settings[key] = value;
+        }
+    });
 }
 
 export default function Settings() {
     useProxy(settings);
 
+    const categories = parseIdList(settings.categoryIds);
+    const labels = parseLabelList(settings.buttonLabels);
+
     return (
-        <ScrollView style={{ flex: 1 }}>
-            <FormSection title="Master">
-                <Switch
-                    setting="armed"
-                    label="Armed"
-                    subLabel="Turn off to keep the plugin loaded but stop it pressing anything."
-                />
-            </FormSection>
+        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 48 }}>
+            <Container {...containerProps}>
+                <Group title="Master">
+                    <SwitchRow
+                        label="Armed"
+                        subLabel="Stays loaded but presses nothing"
+                        value={settings.armed}
+                        onValueChange={(v: boolean) => { settings.armed = v; }}
+                    />
+                </Group>
 
-            <FormSection title="What to watch">
-                <TextRow
-                    setting="categoryIds"
-                    title="Category IDs"
-                    placeholder="comma-separated category IDs"
-                />
-                <FormDivider />
-                <TextRow
-                    setting="buttonLabels"
-                    title="Button labels"
-                    placeholder="Join Queue"
-                />
-                <FormDivider />
-                <TextRow
-                    setting="ticketBotId"
-                    title="Ticket bot user ID"
-                    placeholder="empty = any author (not recommended)"
-                />
-                <FormText style={{ paddingHorizontal: 16, paddingBottom: 8 }}>
-                    Setting the bot ID stops anyone baiting a press with a fake button.
-                </FormText>
-                <FormDivider />
-                <TextRow
-                    setting="channelNamePattern"
-                    title="Channel name pattern"
-                    placeholder="regex, e.g. ^ticket-"
-                />
-            </FormSection>
+                <Group title="What to watch">
+                    <Row
+                        label="Categories"
+                        subLabel={categories.size
+                            ? `${categories.size} watched`
+                            : "Not set — nothing happens until you add one"}
+                        onPress={() => editText(
+                            "categoryIds",
+                            "Category IDs",
+                            "comma-separated IDs",
+                            value => value && parseIdList(value).size === 0
+                                ? "No valid IDs found. Each must be 17-20 digits, separated by commas."
+                                : null
+                        )}
+                    />
+                    <Row
+                        label="Button labels"
+                        subLabel={labels.length ? labels.join(", ") : "Not set — nothing will match"}
+                        onPress={() => editText(
+                            "buttonLabels",
+                            "Button labels",
+                            "Join Queue",
+                            value => parseLabelList(value).length === 0
+                                ? "Give at least one label to press."
+                                : null
+                        )}
+                    />
+                    <Row
+                        label="Ticket bot"
+                        subLabel={ticketBotId() || "Any author (not recommended)"}
+                        onPress={() => editText(
+                            "ticketBotId",
+                            "Ticket bot user ID",
+                            "leave empty to allow any author",
+                            value => value && parseIdList(value).size !== 1
+                                ? "Enter a single user ID of 17-20 digits, or leave it empty."
+                                : null
+                        )}
+                    />
+                    <Row
+                        label="Channel name pattern"
+                        subLabel={settingText(settings.channelNamePattern) || "No name filter"}
+                        onPress={() => editText(
+                            "channelNamePattern",
+                            "Channel name pattern",
+                            "regex, e.g. ^ticket-",
+                            value => value && !parsePattern(value)
+                                ? "That is not a valid regular expression."
+                                : null
+                        )}
+                    />
+                </Group>
 
-            <FormSection title="When to press">
-                <Switch
-                    setting="onlyWhenActive"
-                    label="Only while you are using Discord"
-                    subLabel="Requires the app in the foreground and recent activity. Prevents claiming a ticket you cannot service."
-                />
-                <FormDivider />
-                <NumberRow setting="idleThresholdMs" title="Idle threshold (ms)" />
-                <FormDivider />
-                <TextRow
-                    setting="activeHours"
-                    title="Active hours"
-                    placeholder="09:00-23:00, may wrap midnight"
-                />
-                <FormDivider />
-                <NumberRow setting="minDelayMs" title="Minimum delay before pressing (ms)" />
-                <FormDivider />
-                <NumberRow setting="maxDelayMs" title="Maximum delay before pressing (ms)" />
-                <FormDivider />
-                <NumberRow setting="cooldownMs" title="Cooldown between presses (ms)" />
-            </FormSection>
+                <Group title="When to press">
+                    <SwitchRow
+                        label="Only while you are using Discord"
+                        subLabel="Foreground and recent activity"
+                        value={settings.onlyWhenActive}
+                        onValueChange={(v: boolean) => { settings.onlyWhenActive = v; }}
+                    />
+                    <Row
+                        label="Counts as away after"
+                        subLabel={formatMs(settings.idleThresholdMs)}
+                        onPress={() => editNumber("idleThresholdMs", "Idle threshold", "milliseconds")}
+                    />
+                    <Row
+                        label="Active hours"
+                        subLabel={settingText(settings.activeHours) || "Any time"}
+                        onPress={() => editText(
+                            "activeHours",
+                            "Active hours",
+                            "09:00-23:00",
+                            value => value && !parseHourWindow(value)
+                                ? "Use HH:MM-HH:MM, for example 09:00-23:00. It may wrap midnight."
+                                : null
+                        )}
+                    />
+                    <Row
+                        label="Delay before pressing"
+                        subLabel={`${formatMs(settings.minDelayMs)} to ${formatMs(settings.maxDelayMs)}`}
+                        onPress={() => editNumber("minDelayMs", "Minimum delay", "milliseconds")}
+                    />
+                    <Row
+                        label="Maximum delay"
+                        subLabel={formatMs(settings.maxDelayMs)}
+                        onPress={() => editNumber("maxDelayMs", "Maximum delay", "milliseconds")}
+                    />
+                    <Row
+                        label="Cooldown between presses"
+                        subLabel={formatMs(settings.cooldownMs)}
+                        onPress={() => editNumber("cooldownMs", "Cooldown", "milliseconds")}
+                    />
+                </Group>
 
-            <FormSection title="Catching up on missed tickets">
-                <Switch
-                    setting="sweepOnReconnect"
-                    label="Sweep after reconnect"
-                    subLabel="No message events arrive while the gateway is down, which on mobile is every time the app is suspended."
-                />
-                <FormDivider />
-                <Switch
-                    setting="catchUpOnStart"
-                    label="Sweep on startup"
-                    subLabel="Off by default: after time away this can join a burst of tickets at once."
-                />
-                <FormDivider />
-                <NumberRow setting="periodicSweepMs" title="Periodic re-scan (ms, 0 = off)" />
-                <FormDivider />
-                <NumberRow setting="catchUpMaxAgeMs" title="Ignore tickets older than (ms)" />
-            </FormSection>
+                <Group title="Catching up on missed tickets">
+                    <SwitchRow
+                        label="Sweep after reconnect"
+                        subLabel="Catches tickets missed while suspended"
+                        value={settings.sweepOnReconnect}
+                        onValueChange={(v: boolean) => { settings.sweepOnReconnect = v; }}
+                    />
+                    <SwitchRow
+                        label="Sweep on startup"
+                        subLabel="May join a burst after time away"
+                        value={settings.catchUpOnStart}
+                        onValueChange={(v: boolean) => { settings.catchUpOnStart = v; }}
+                    />
+                    <Row
+                        label="Periodic re-scan"
+                        subLabel={settings.periodicSweepMs > 0 ? `Every ${formatMs(settings.periodicSweepMs)}` : "Off"}
+                        onPress={() => editNumber("periodicSweepMs", "Periodic re-scan", "milliseconds, 0 to disable")}
+                    />
+                    <Row
+                        label="Ignore tickets older than"
+                        subLabel={formatMs(settings.catchUpMaxAgeMs)}
+                        onPress={() => editNumber("catchUpMaxAgeMs", "Maximum ticket age", "milliseconds")}
+                    />
+                </Group>
 
-            <FormSection title="Draws and alerts">
-                <Switch
-                    setting="notifyOnWin"
-                    label="Alert when the draw picks you"
-                    subLabel="Stays up until dismissed, because one you miss is worthless."
-                />
-                <FormDivider />
-                <Switch
-                    setting="autoNavigateOnWin"
-                    label="Jump to the ticket on a win"
-                    subLabel="Opens the channel as soon as you are selected."
-                />
-                <FormDivider />
-                <Switch
-                    setting="warnIfAwayOnDraw"
-                    label="Warn if a draw closes while you are away"
-                    subLabel="You stay in the queue either way - this never forfeits a ticket for you."
-                />
-                <FormDivider />
-                <NumberRow setting="drawWarningLeadMs" title="Warning lead time (ms)" />
-                <FormDivider />
-                <NumberRow setting="drawWatchWindowMs" title="Draw watch window (ms)" />
-            </FormSection>
+                <Group title="Draws and alerts">
+                    <SwitchRow
+                        label="Alert when the draw picks you"
+                        subLabel="Stays up until dismissed"
+                        value={settings.notifyOnWin}
+                        onValueChange={(v: boolean) => { settings.notifyOnWin = v; }}
+                    />
+                    <SwitchRow
+                        label="Jump to the ticket on a win"
+                        subLabel="Opens the channel for you"
+                        value={settings.autoNavigateOnWin}
+                        onValueChange={(v: boolean) => { settings.autoNavigateOnWin = v; }}
+                    />
+                    <SwitchRow
+                        label="Warn if a draw closes while you are away"
+                        subLabel="Never forfeits your place"
+                        value={settings.warnIfAwayOnDraw}
+                        onValueChange={(v: boolean) => { settings.warnIfAwayOnDraw = v; }}
+                    />
+                    <Row
+                        label="Warning lead time"
+                        subLabel={formatMs(settings.drawWarningLeadMs)}
+                        onPress={() => editNumber("drawWarningLeadMs", "Warning lead time", "milliseconds")}
+                    />
+                    <Row
+                        label="Draw watch window"
+                        subLabel={formatMs(settings.drawWatchWindowMs)}
+                        onPress={() => editNumber("drawWatchWindowMs", "Draw watch window", "milliseconds")}
+                    />
+                </Group>
 
-            <FormSection title="Feedback">
-                <Switch
-                    setting="notifyOnJoin"
-                    label="Toast on join or failure"
-                    subLabel="Show a toast when a queue is joined or a press fails."
-                />
-                <FormDivider />
-                <Switch
-                    setting="verboseLogging"
-                    label="Verbose logging"
-                    subLabel="Log every match decision to the debug log. Use while setting up."
-                />
-            </FormSection>
+                <Group title="Feedback">
+                    <SwitchRow
+                        label="Toast on join or failure"
+                        value={settings.notifyOnJoin}
+                        onValueChange={(v: boolean) => { settings.notifyOnJoin = v; }}
+                    />
+                    <SwitchRow
+                        label="Verbose logging"
+                        subLabel="Log every match decision"
+                        value={settings.verboseLogging}
+                        onValueChange={(v: boolean) => { settings.verboseLogging = v; }}
+                    />
+                    <Row
+                        label="Reset all settings"
+                        subLabel="Back to defaults"
+                        onPress={() => {
+                            for (const [key, value] of Object.entries(DEFAULTS)) {
+                                (settings as any)[key] = value;
+                            }
+                        }}
+                    />
+                </Group>
+            </Container>
         </ScrollView>
     );
 }

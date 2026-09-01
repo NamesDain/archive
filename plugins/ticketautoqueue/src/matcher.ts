@@ -7,7 +7,7 @@
  */
 
 import { getChannel } from "./discord";
-import { parseIdList, parseLabelList, parsePattern, settings } from "./settings";
+import { parseIdList, parseLabelList, parsePattern, settings, ticketBotId } from "./settings";
 
 export interface TicketTarget {
     channelId: string;
@@ -76,7 +76,7 @@ export function matchTicket(message: any): MatchResult {
         return { ok: false, reason: `channel name "${channel.name}" failed pattern` };
     }
 
-    const botId = settings.ticketBotId.trim();
+    const botId = ticketBotId();
     if (botId && String(message.author?.id) !== botId) {
         return { ok: false, reason: `author ${message.author?.id} is not the configured ticket bot` };
     }

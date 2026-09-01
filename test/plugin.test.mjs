@@ -85,7 +85,7 @@ describe("loading", () => {
         plugin.onUnload();
     });
 
-    it("renders its settings page", () => {
+    it("renders its settings page on Discord's current table components", () => {
         const { vendetta } = createMockVendetta();
         const created = [];
         vendetta.metro.common.React.createElement = (type, props, ...children) => {
@@ -100,7 +100,25 @@ describe("loading", () => {
 
         assert.ok(tree, "the settings component must return an element");
         assert.ok(created.includes("ScrollView"), "expected the page to be scrollable");
-        assert.ok(created.includes("FormSection"), "expected the settings to be grouped into sections");
+        assert.ok(created.includes("TableRowGroup"), "expected modern grouped rows, not legacy Forms");
+        assert.ok(created.includes("TableSwitchRow"), "expected modern switch rows");
+        assert.ok(!created.includes("FormSection"), "legacy Forms should not be used when tables resolve");
+        plugin.onUnload();
+    });
+
+    it("falls back to legacy Forms if the table components have moved", () => {
+        const { vendetta } = createMockVendetta({ modernComponents: false });
+        const created = [];
+        vendetta.metro.common.React.createElement = (type, props, ...children) => {
+            created.push(typeof type === "string" ? type : type?.name ?? "component");
+            return { type, props, children };
+        };
+
+        const plugin = evalPlugin(BUNDLE, vendetta);
+        plugin.onLoad();
+
+        assert.ok(plugin.settings(), "the page must still render without the table components");
+        assert.ok(created.includes("ScrollView"), "expected the page to still be scrollable");
         plugin.onUnload();
     });
 
@@ -122,6 +140,118 @@ describe("loading", () => {
         assert.equal(fluxHandlers.get("CONNECTION_OPEN").size, 0);
         assert.equal(fluxHandlers.get("CHANNEL_SELECT").size, 0);
         assert.equal(registeredCommands.length, 0);
+    });
+});
+
+describe("editing a setting from the page", () => {
+    /** Renders the page and returns the row props keyed by label. */
+    function renderRows() {
+        const mock = createMockVendetta();
+        const rows = new Map();
+        mock.vendetta.metro.common.React.createElement = (type, props, ...children) => {
+            if (props?.label) rows.set(props.label, props);
+            return { type, props, children };
+        };
+
+        const plugin = evalPlugin(BUNDLE, mock.vendetta);
+        plugin.onLoad();
+        plugin.settings();
+        return { ...mock, plugin, rows };
+    }
+
+    it("opens an input dialog seeded with the current value", () => {
+        const c = renderRows();
+        c.rows.get("Button labels").onPress();
+
+        assert.equal(c.calls.inputAlerts.length, 1);
+        assert.equal(c.calls.inputAlerts[0].initialValue, "Join Queue");
+        c.plugin.onUnload();
+    });
+
+    it("saves a valid value", async () => {
+        const c = renderRows();
+        c.rows.get("Categories").onPress();
+
+        await c.calls.inputAlerts[0].onConfirm("333333333333333333, 444444444444444444");
+
+        assert.equal(c.storage.categoryIds, "333333333333333333, 444444444444444444");
+        c.plugin.onUnload();
+    });
+
+    it("rejects input with no valid IDs instead of silently going inert", async () => {
+        const c = renderRows();
+        const before = c.storage.categoryIds;
+        c.rows.get("Categories").onPress();
+
+        await assert.rejects(
+            () => Promise.resolve(c.calls.inputAlerts[0].onConfirm("not-an-id")),
+            /No valid IDs/
+        );
+        assert.equal(c.storage.categoryIds, before, "a rejected value must not be written");
+        c.plugin.onUnload();
+    });
+
+    it("rejects a regex that will not compile", async () => {
+        const c = renderRows();
+        c.rows.get("Channel name pattern").onPress();
+
+        await assert.rejects(
+            () => Promise.resolve(c.calls.inputAlerts[0].onConfirm("^ticket-[")),
+            /not a valid regular expression/
+        );
+        c.plugin.onUnload();
+    });
+
+    it("rejects a malformed active-hours window", async () => {
+        const c = renderRows();
+        c.rows.get("Active hours").onPress();
+
+        await assert.rejects(
+            () => Promise.resolve(c.calls.inputAlerts[0].onConfirm("9am-11pm")),
+            /HH:MM-HH:MM/
+        );
+        c.plugin.onUnload();
+    });
+
+    it("rejects a non-numeric duration rather than storing NaN", async () => {
+        const c = renderRows();
+        c.rows.get("Cooldown between presses").onPress();
+
+        await assert.rejects(
+            () => Promise.resolve(c.calls.inputAlerts[0].onConfirm("three seconds")),
+            /number of milliseconds/
+        );
+        assert.equal(c.storage.cooldownMs, 3000, "the old value must survive a rejected edit");
+        c.plugin.onUnload();
+    });
+
+    it("shows durations in readable units, not raw milliseconds", () => {
+        const c = renderRows();
+
+        assert.equal(c.rows.get("Counts as away after").subLabel, "5 min");
+        assert.equal(c.rows.get("Cooldown between presses").subLabel, "3s");
+        assert.equal(c.rows.get("Periodic re-scan").subLabel, "Off");
+        c.plugin.onUnload();
+    });
+
+    it("says plainly when nothing is configured yet", () => {
+        const c = renderRows();
+
+        assert.match(c.rows.get("Categories").subLabel, /^Not set/);
+        assert.match(c.rows.get("Ticket bot").subLabel, /Any author/);
+        c.plugin.onUnload();
+    });
+
+    it("resets every value to its default", () => {
+        const c = renderRows();
+        c.storage.armed = false;
+        c.storage.categoryIds = "333333333333333333";
+
+        c.rows.get("Reset all settings").onPress();
+
+        assert.equal(c.storage.armed, true);
+        assert.equal(c.storage.categoryIds, "");
+        c.plugin.onUnload();
     });
 });
 

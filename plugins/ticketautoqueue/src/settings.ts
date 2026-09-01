@@ -69,22 +69,52 @@ export const DEFAULTS: Readonly<TaqSettings> = {
 export const settings = storage as unknown as TaqSettings;
 
 /**
- * Fills in any key the stored object does not have yet.
+ * Fills in missing keys, and repairs ones holding the wrong type.
+ *
+ * The repair is not defensive padding. An earlier build of the settings page
+ * wired Discord's form input straight to storage, and that control reports its
+ * value as `{ text }` rather than a string on this platform - so `categoryIds`
+ * could be saved as an object. Every gate then read it as unconfigured and the
+ * plugin sat inert with nothing in the log to say why. Anyone upgrading past
+ * that build still has the bad value, and a missing-key check alone would leave
+ * it in place forever, so the text is recovered where possible and the key is
+ * reset where not.
  *
  * Runs on load rather than at import time: Kettu creates the storage proxy before
  * it evaluates the plugin, but writing to it during module evaluation would land
  * before the plugin object exists.
  */
 export function initSettings(): void {
-    for (const [key, value] of Object.entries(DEFAULTS)) {
-        if ((settings as any)[key] === undefined) (settings as any)[key] = value;
+    for (const [key, fallback] of Object.entries(DEFAULTS)) {
+        const current = (settings as any)[key];
+
+        if (current === undefined) {
+            (settings as any)[key] = fallback;
+            continue;
+        }
+
+        if (typeof current === typeof fallback) continue;
+
+        // Salvage the value the user actually typed before falling back.
+        const recovered = typeof fallback === "string" && current && typeof current === "object"
+            ? (current as any).text
+            : undefined;
+
+        (settings as any)[key] = typeof recovered === "string" ? recovered : fallback;
     }
 }
+
+/** Anything reaching the parsers may still be a stray shape from an older build. */
+export const settingText = (raw: unknown): string => {
+    if (typeof raw === "string") return raw;
+    if (raw && typeof raw === "object" && typeof (raw as any).text === "string") return (raw as any).text;
+    return "";
+};
 
 /** Split a comma-separated string into a set of valid snowflake IDs. Invalid entries are dropped, never thrown. */
 export function parseIdList(raw: string): Set<string> {
     const out = new Set<string>();
-    for (const part of (raw ?? "").split(",")) {
+    for (const part of settingText(raw).split(",")) {
         const id = part.trim();
         if (SNOWFLAKE.test(id)) out.add(id);
     }
@@ -93,7 +123,7 @@ export function parseIdList(raw: string): Set<string> {
 
 /** Split a comma-separated string into lowercased, trimmed labels. */
 export function parseLabelList(raw: string): string[] {
-    return (raw ?? "")
+    return settingText(raw)
         .split(",")
         .map(s => s.trim().toLowerCase())
         .filter(Boolean);
@@ -101,13 +131,18 @@ export function parseLabelList(raw: string): string[] {
 
 /** Compile a user-supplied regex. Invalid input disables the filter rather than breaking every message. */
 export function parsePattern(raw: string): RegExp | null {
-    const src = (raw ?? "").trim();
+    const src = settingText(raw).trim();
     if (!src) return null;
     try {
         return new RegExp(src, "i");
     } catch {
         return null;
     }
+}
+
+/** The configured ticket bot ID, tolerant of a value stored by an older build. */
+export function ticketBotId(): string {
+    return settingText(settings.ticketBotId).trim();
 }
 
 /**
