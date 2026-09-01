@@ -136,6 +136,11 @@ export function createMockVendetta({ modernComponents = true } = {}) {
                 // session from CONNECTION_OPEN, and the tests must exercise that path.
                 return undefined;
             },
+            find(predicate) {
+                // Discord's text field lives in a module exporting nothing else.
+                const candidates = modernComponents ? [{ TextInput: "TextInput" }] : [];
+                return candidates.find(predicate);
+            },
             findByStoreName(name) {
                 return stores[name];
             },
@@ -159,7 +164,10 @@ export function createMockVendetta({ modernComponents = true } = {}) {
             },
             alerts: {
                 showConfirmationAlert: options => calls.alerts.push(options),
-                showInputAlert: options => calls.inputAlerts.push(options)
+                showInputAlert: options => {
+                    calls.inputAlerts.push(options);
+                    throw new Error("bunny.metro.byDisplayName(FluxContainer(Alert)) is undefined! (id unknown)");
+                }
             },
             assets: { getAssetIDByName: () => 1 },
             toasts: { showToast: (content, asset) => calls.toasts.push({ content, asset }) }
