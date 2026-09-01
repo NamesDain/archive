@@ -1,0 +1,14 @@
+{
+    "name": "TicketAutoQueue",
+    "description": "Presses the Join Queue button on support tickets in configured categories, only while you are actually using Discord.",
+    "authors": [
+        {
+            "name": "river",
+            "id": "0"
+        }
+    ],
+    "main": "src/index.ts",
+    "vendetta": {
+        "icon": "ic_badge_staff"
+    }
+}
