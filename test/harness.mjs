@@ -5,10 +5,17 @@
 // that is never removed - are all observable from outside. The mock records every
 // call so a test can assert on it.
 
-export function createMockVendetta() {
+/**
+ * @param {object} [options]
+ * @param {boolean} [options.modernComponents] false makes findByProps miss the
+ *   table components, so the settings page falls back to legacy Forms - the
+ *   path a build that moved them would take.
+ */
+export function createMockVendetta({ modernComponents = true } = {}) {
     const calls = {
         toasts: [],
         alerts: [],
+        inputAlerts: [],
         rest: [],
         botMessages: [],
         navigations: [],
@@ -98,6 +105,12 @@ export function createMockVendetta() {
         },
         metro: {
             findByProps(...props) {
+                if (props.includes("TableRowGroup")) {
+                    return modernComponents
+                        ? { TableRowGroup: "TableRowGroup", TableSwitchRow: "TableSwitchRow", TableRow: "TableRow" }
+                        : undefined;
+                }
+                if (props.includes("Stack")) return modernComponents ? { Stack: "Stack" } : undefined;
                 if (props.includes("getAPIBaseURL")) return RestAPI;
                 if (props.includes("sendBotMessage")) {
                     return { sendBotMessage: (channelId, content) => calls.botMessages.push({ channelId, content }) };
@@ -114,7 +127,7 @@ export function createMockVendetta() {
             },
             common: {
                 FluxDispatcher,
-                ReactNative: { AppState, Vibration: { vibrate() {} }, ScrollView: "ScrollView" },
+                ReactNative: { AppState, Vibration: { vibrate() {} }, ScrollView: "ScrollView", View: "View" },
                 React: { useState: v => [v, () => {}], createElement: () => null }
             }
         },
@@ -130,7 +143,10 @@ export function createMockVendetta() {
                     FormText: "FormText"
                 }
             },
-            alerts: { showConfirmationAlert: options => calls.alerts.push(options) },
+            alerts: {
+                showConfirmationAlert: options => calls.alerts.push(options),
+                showInputAlert: options => calls.inputAlerts.push(options)
+            },
             assets: { getAssetIDByName: () => 1 },
             toasts: { showToast: (content, asset) => calls.toasts.push({ content, asset }) }
         }
