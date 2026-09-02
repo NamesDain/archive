@@ -1157,7 +1157,7 @@ describe("the gateway session id", () => {
         );
         const report = c.calls.botMessages.at(-1).content;
 
-        assert.match(report, /Gateway connects seen:\*\* \*\*none since load\*\*/);
+        assert.match(report, /no connect event fires on this build/);
         assert.match(report, /held via module lookup/);
         c.plugin.onUnload();
     });
@@ -1278,5 +1278,79 @@ describe("finding the gateway connect event this build uses", () => {
             "a non-CONNECTION_OPEN connect must still drive the catch-up sweep"
         );
         plugin.onUnload();
+    });
+});
+
+describe("noticing a reconnect without a connect event", () => {
+    // No connect event fires on current Discord iOS - a device reported "none
+    // since load" with all seven candidates subscribed - so the reconnect sweep
+    // never ran. The session id was seen changing between status calls, and a new
+    // id means a new connection, so that change is the signal instead.
+    const afterTick = () => new Promise(r => setTimeout(r, 9000));
+
+    function configuredWithoutConnectEvents() {
+        const mock = createMockVendetta();
+        const plugin = evalPlugin(BUNDLE, mock.vendetta);
+        plugin.onLoad();
+        Object.assign(mock.storage, {
+            categoryIds: CATEGORY_ID, ticketBotId: BOT_ID,
+            minDelayMs: 0, maxDelayMs: 0, cooldownMs: 0
+        });
+        mock.stores.ChannelStore._channels.set(CATEGORY_ID, makeChannel({
+            id: CATEGORY_ID, name: "support", parentId: null, guildId: GUILD_ID
+        }));
+        mock.stores.GuildChannelStore._byGuild.set(GUILD_ID, {
+            SELECTABLE: [{ channel: makeChannel({
+                id: snowflakeNow(), name: "ticket-0001", parentId: CATEGORY_ID, guildId: GUILD_ID
+            }) }]
+        });
+        const status = () => {
+            mock.registeredCommands[0].execute(
+                [{ name: "action", value: "status" }],
+                { channel: { id: TICKET_CHANNEL_ID } }
+            );
+            return mock.calls.botMessages.at(-1).content;
+        };
+        return { ...mock, plugin, status };
+    }
+
+    it("sweeps when the session id changes, with no dispatch involved", async () => {
+        const c = configuredWithoutConnectEvents();
+        c.setModuleSessionId("session-alpha");
+
+        await afterTick();
+        assert.match(c.status(), /last ran never/, "the baseline sighting is not a reconnect");
+
+        // The connection is replaced. No event is dispatched, as on the device.
+        c.setModuleSessionId("session-beta");
+        await afterTick();
+
+        assert.doesNotMatch(
+            c.status(),
+            /last ran never/,
+            "a changed session id must drive the catch-up sweep on its own"
+        );
+        c.plugin.onUnload();
+    });
+
+    it("counts those reconnects in status", async () => {
+        const c = configuredWithoutConnectEvents();
+        c.setModuleSessionId("one");
+        await afterTick();
+        c.setModuleSessionId("two");
+        await afterTick();
+
+        assert.match(c.status(), /no connect event fires on this build_ — 1 reconnect\(s\) detected/);
+        c.plugin.onUnload();
+    });
+
+    it("does not mistake a steady session for a reconnect", async () => {
+        const c = configuredWithoutConnectEvents();
+        c.setModuleSessionId("unchanging");
+        await afterTick();
+        await afterTick();
+
+        assert.match(c.status(), /0 reconnect\(s\) detected/, "an unchanged id is not a reconnect");
+        c.plugin.onUnload();
     });
 });

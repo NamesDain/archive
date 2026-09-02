@@ -19,7 +19,10 @@ import {
 } from "./gates";
 import { outcomeReportingSeen, resetInteractionWatch, startInteractionWatch, stopInteractionWatch } from "./interactions";
 import { collectButtons, customIdOf, matchTicket } from "./matcher";
-import { CONNECT_EVENTS, forgetSessionId, observedConnectEvents, rememberSessionId, sessionStatus } from "./session";
+import {
+    CONNECT_EVENTS, forgetSessionId, getSessionId, noteSessionChange, observedConnectEvents,
+    rememberSessionId, sessionChangeCount, sessionStatus
+} from "./session";
 import { initSettings, parseIdList, parseLabelList, settings, ticketBotId } from "./settings";
 import {
     describeDuration, getStats, parseDuration, recordLoss, recordPress, recordRejection, recordWin,
@@ -43,6 +46,9 @@ let lastAutoSweepAt = 0;
 // so that wake is allowed one sweep regardless of how recently one ran.
 let sweptSinceWake = true;
 let foregroundSweepTimer: ReturnType<typeof setTimeout> | null = null;
+// The last gateway session id observed. A change means the connection was
+// replaced, which is the one reconnect signal this build reliably gives us.
+let lastSeenSessionId: string | null = null;
 
 // Guild channels and the message store fill in asynchronously after a connection
 // opens, so an immediate sweep would see a partial channel list.
@@ -328,6 +334,36 @@ function onGatewayConnect(eventName: string, event: any) {
  * mean nothing ever re-scans - which shows up as a ticket that was never joined
  * even though the app was open again well before its draw closed.
  */
+/**
+ * Detects a reconnect by the session id changing.
+ *
+ * The dispatch that used to signal this does not fire here under any name tried,
+ * so the reconnect sweep never ran at all. A session id belongs to one
+ * connection, so a new one is proof the old connection went away - and the
+ * maintenance tick is already running every few seconds, making this free.
+ */
+function checkForReconnect(): void {
+    const current = getSessionId();
+    if (!current) return;
+
+    if (lastSeenSessionId === null) {
+        // First sighting establishes the baseline; it is not evidence of a change.
+        lastSeenSessionId = current;
+        return;
+    }
+
+    if (current === lastSeenSessionId) return;
+
+    lastSeenSessionId = current;
+    noteSessionChange();
+    if (!settings.sweepOnReconnect) return;
+
+    logger.info("The gateway session changed, so the connection was replaced; sweeping for anything missed.");
+    sweptSinceWake = false;
+    if (reconnectSweepTimer !== null) clearTimeout(reconnectSweepTimer);
+    reconnectSweepTimer = setTimeout(() => void autoSweep("session change"), WAKE_SETTLE_MS);
+}
+
 function onReturnedToForeground(): void {
     try {
         if (!settings.sweepOnReconnect) return;
@@ -384,8 +420,9 @@ function statusReport(): string {
     // Whether this dispatch fires at all decides two things: where the session id
     // comes from, and whether the reconnect sweep ever runs. "never" alongside a
     // session held by module lookup means neither is happening.
+    const changes = sessionChangeCount();
     lines.push(`**Gateway connects seen:** ${session.connectionOpens === 0
-        ? "**none since load** — reconnect sweeps cannot fire; foreground sweeps still can"
+        ? `_no connect event fires on this build_ — ${changes} reconnect(s) detected by session change instead`
         : `${observedConnectEvents().join(", ")} — last ${describeDuration(Date.now() - session.lastConnectionOpenAt)} ago`}`);
 
     if (gates.pausedForMs > 0) {
@@ -479,6 +516,7 @@ export default {
         awayCheckTimer = setInterval(() => {
             // An exception here would kill the interval for the rest of the session.
             try {
+                checkForReconnect();
                 checkAwayDuringDraws();
                 maybePeriodicSweep();
             } catch (err) {
@@ -574,6 +612,7 @@ export default {
         unregisterCommand?.();
         unregisterCommand = null;
 
+        lastSeenSessionId = null;
         stopInteractionWatch();
         stopActivityTracking();
         resetGates();

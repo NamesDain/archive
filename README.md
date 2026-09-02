@@ -109,10 +109,16 @@ While Discord is backgrounded its gateway connection drops and its timers stop, 
 in that window arrive as no event at all. Exactly how long the OS allows before that happens is not
 something this project has measured — treat it as "expect gaps", not as a precise limit.
 
-What the plugin does about it: both a gateway reconnect **and** a return to the foreground trigger
-a catch-up sweep, each wake gets one sweep even if another ran moments earlier, and the sweep can
-list channels over REST when the store is still cold. A draw closes in roughly a minute, so the
-wake path is deliberately quick.
+What the plugin does about it: a return to the foreground triggers a catch-up sweep, each wake gets
+one sweep even if another ran moments earlier, and the sweep can list channels over REST when the
+store is still cold. A draw closes in roughly a minute, so the wake path is deliberately quick.
+
+Reconnects are noticed by watching the gateway session id change, not by a dispatch. On current
+Discord iOS none of the usual connect events fire — `CONNECTION_OPEN`, `READY`, `RESUMED` and
+several others were all subscribed and none arrived — so the reconnect sweep never ran at all. A
+session id belongs to one connection, so a new one is proof the old connection went away, and the
+plugin already polls often enough to spot it. `/taq status` reports how many reconnects were caught
+this way, and names the connect event instead if one ever does fire.
 
 Anything still open when you come back should be caught. A draw that opened and closed entirely
 while the app was away cannot be — no code running inside Discord can press a button during a
