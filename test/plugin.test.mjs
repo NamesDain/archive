@@ -1052,3 +1052,124 @@ describe("pausing, limits and stats", () => {
         c.plugin.onUnload();
     });
 });
+
+describe("the gateway session id", () => {
+    /** Loaded and configured, but with no CONNECTION_OPEN - the state seen on device. */
+    function withoutConnectionOpen() {
+        const mock = createMockVendetta();
+        const plugin = evalPlugin(BUNDLE, mock.vendetta);
+        plugin.onLoad();
+        Object.assign(mock.storage, {
+            categoryIds: CATEGORY_ID, ticketBotId: BOT_ID,
+            minDelayMs: 0, maxDelayMs: 0, cooldownMs: 0
+        });
+        mock.stores.ChannelStore._channels.set(CATEGORY_ID, makeChannel({
+            id: CATEGORY_ID, name: "support", parentId: null, guildId: GUILD_ID
+        }));
+        mock.stores.ChannelStore._channels.set(TICKET_CHANNEL_ID, makeChannel({
+            id: TICKET_CHANNEL_ID, name: "ticket-0001", parentId: CATEGORY_ID, guildId: GUILD_ID
+        }));
+        return { ...mock, plugin };
+    }
+
+    // A session id belongs to one connection. The client reissues it on every
+    // reconnect - on mobile, every app switch. Remembering the first one meant
+    // every later press went out under an id that no longer existed, and Discord
+    // accepts those and simply never routes the reply back.
+    it("re-reads the live id instead of reusing the first one it saw", async () => {
+        const c = withoutConnectionOpen();
+        c.setModuleSessionId("session-one");
+
+        dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
+            message: makeTicketPanel({ id: "1100", channelId: TICKET_CHANNEL_ID, botId: BOT_ID })
+        });
+        await settle();
+
+        // The connection is replaced, as it is whenever the app is switched away from.
+        c.setModuleSessionId("session-two");
+        const other = "666666666666666666";
+        c.stores.ChannelStore._channels.set(other, makeChannel({
+            id: other, name: "ticket-0002", parentId: CATEGORY_ID, guildId: GUILD_ID
+        }));
+        dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
+            message: makeTicketPanel({ id: "1101", channelId: other, botId: BOT_ID })
+        });
+        await settle();
+
+        const sessions = c.calls.rest
+            .filter(r => r.url === "/interactions")
+            .map(r => r.body.session_id);
+
+        assert.deepEqual(sessions, ["session-one", "session-two"],
+            "the second press must carry the live id, not the one cached from the first");
+        c.plugin.onUnload();
+    });
+
+    it("prefers what CONNECTION_OPEN supplied over a module lookup", async () => {
+        const c = withoutConnectionOpen();
+        c.setModuleSessionId("from-lookup");
+        dispatch(c.fluxHandlers, "CONNECTION_OPEN", { sessionId: "from-connect" });
+
+        dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
+            message: makeTicketPanel({ id: "1102", channelId: TICKET_CHANNEL_ID, botId: BOT_ID })
+        });
+        await settle();
+
+        assert.equal(
+            c.calls.rest.find(r => r.url === "/interactions").body.session_id,
+            "from-connect"
+        );
+        c.plugin.onUnload();
+    });
+
+    it("drops the remembered id when a connect arrives without one", async () => {
+        const c = withoutConnectionOpen();
+        dispatch(c.fluxHandlers, "CONNECTION_OPEN", { sessionId: "first" });
+        // A reconnect that carries no id: the old one is dead regardless, so it
+        // must not be left standing.
+        dispatch(c.fluxHandlers, "CONNECTION_OPEN", {});
+        c.setModuleSessionId("live-now");
+
+        dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
+            message: makeTicketPanel({ id: "1103", channelId: TICKET_CHANNEL_ID, botId: BOT_ID })
+        });
+        await settle();
+
+        assert.equal(
+            c.calls.rest.find(r => r.url === "/interactions").body.session_id,
+            "live-now",
+            "a dead id must give way to the live one"
+        );
+        c.plugin.onUnload();
+    });
+
+    it("reports when no gateway connect has been seen at all", () => {
+        const c = withoutConnectionOpen();
+        c.setModuleSessionId("abcdef0123456789abcdef0123456789");
+
+        c.registeredCommands[0].execute(
+            [{ name: "action", value: "status" }],
+            { channel: { id: TICKET_CHANNEL_ID } }
+        );
+        const report = c.calls.botMessages.at(-1).content;
+
+        assert.match(report, /Gateway connects seen:\*\* \*\*none since load\*\*/);
+        assert.match(report, /held via module lookup/);
+        c.plugin.onUnload();
+    });
+
+    it("does not read failure into a session with no presses yet", () => {
+        const c = withoutConnectionOpen();
+
+        c.registeredCommands[0].execute(
+            [{ name: "action", value: "status" }],
+            { channel: { id: TICKET_CHANNEL_ID } }
+        );
+
+        assert.match(
+            c.calls.botMessages.at(-1).content,
+            /Press confirmation:\*\* _unknown until the first press/
+        );
+        c.plugin.onUnload();
+    });
+});
