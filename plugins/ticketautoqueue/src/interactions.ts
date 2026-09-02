@@ -42,6 +42,13 @@ const waiting = new Map<string, Waiter>();
  */
 let outcomesObserved = false;
 
+/**
+ * Set the first time a press times out having never seen any outcome. Together
+ * with outcomesObserved staying false, it means this build does not report them
+ * at all, and later presses should not wait to rediscover that.
+ */
+let timedOutWithoutAnyOutcome = false;
+
 function nonceOf(event: any): string | undefined {
     const nonce = event?.nonce ?? event?.interaction?.nonce ?? event?.interactionNonce;
     return nonce === undefined || nonce === null ? undefined : String(nonce);
@@ -101,9 +108,20 @@ export function stopInteractionWatch(): void {
  * is going to be.
  */
 export function awaitOutcome(nonce: string, timeoutMs: number): Promise<Outcome> {
+    // Once a press has timed out with no outcome ever seen, this build does not
+    // report them, and every later press would pay the same wait to learn the same
+    // thing. On a draw that closes in about a minute, spending four seconds of it
+    // waiting for a dispatch that is never coming is worse than not knowing sooner
+    // - and a sweep pays it once per channel. One press establishes it; the rest
+    // return at once.
+    if (!outcomesObserved && timedOutWithoutAnyOutcome) {
+        return Promise.resolve<Outcome>("unknown");
+    }
+
     return new Promise<Outcome>(settle => {
         const timer = setTimeout(() => {
             waiting.delete(nonce);
+            if (!outcomesObserved) timedOutWithoutAnyOutcome = true;
             // A client that has never reported an outcome is not evidence of a
             // failed press, only of a client that does not report.
             settle(outcomesObserved ? "rejected" : "unknown");
@@ -118,7 +136,13 @@ export function outcomeReportingSeen(): boolean {
     return outcomesObserved;
 }
 
+/** True once a press has proved this build never reports outcomes. */
+export function outcomeReportingRuledOut(): boolean {
+    return !outcomesObserved && timedOutWithoutAnyOutcome;
+}
+
 /** Test seam; also keeps a reload from inheriting the previous session's verdict. */
 export function resetInteractionWatch(): void {
     outcomesObserved = false;
+    timedOutWithoutAnyOutcome = false;
 }
