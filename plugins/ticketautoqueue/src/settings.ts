@@ -26,6 +26,8 @@ export interface TaqSettings {
     minDelayMs: number;
     maxDelayMs: number;
     cooldownMs: number;
+    maxConcurrentQueues: number;
+    pausedUntil: number;
     catchUpOnStart: boolean;
     periodicSweepMs: number;
     sweepOnReconnect: boolean;
@@ -53,6 +55,13 @@ export const DEFAULTS: Readonly<TaqSettings> = {
     minDelayMs: 300,
     maxDelayMs: 800,
     cooldownMs: 3000,
+    // 0 keeps the previous behaviour of no ceiling. A limit is opt-in because
+    // silently declining a ticket someone expected to be claimed is worse than
+    // queueing for one too many.
+    maxConcurrentQueues: 0,
+    // Epoch ms. Survives a reload deliberately: a pause you set because you
+    // stepped away should not be undone by the app restarting.
+    pausedUntil: 0,
     catchUpOnStart: false,
     periodicSweepMs: 0,
     sweepOnReconnect: true,

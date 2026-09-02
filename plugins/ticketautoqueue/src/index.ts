@@ -14,13 +14,17 @@ import { press } from "./clicker";
 import { cachedMessages, getChannel, getCurrentUserId, MessageStore, sendBotMessage } from "./discord";
 import { clearDraws, drawsNeedingAlert, markAlerted, observeDraw, pendingDraws, trackDraw } from "./draws";
 import {
-    allow, gateStatus, isOperatorActive, noteActivity, noteRejection, rejectionCount, release,
-    reserve, resetGates, startActivityTracking, stopActivityTracking, withinActiveHours
+    allow, gateStatus, isOperatorActive, noteActivity, noteRejection, pauseFor, rejectionCount,
+    release, reserve, resetGates, resume, startActivityTracking, stopActivityTracking, withinActiveHours
 } from "./gates";
 import { outcomeReportingSeen, resetInteractionWatch, startInteractionWatch, stopInteractionWatch } from "./interactions";
 import { collectButtons, customIdOf, matchTicket } from "./matcher";
 import { forgetSessionId, rememberSessionId, sessionStatus } from "./session";
 import { initSettings, parseIdList, parseLabelList, settings, ticketBotId } from "./settings";
+import {
+    describeDuration, getStats, parseDuration, recordLoss, recordPress, recordRejection, recordWin,
+    resetStats, winRate
+} from "./stats";
 import Settings from "./Settings";
 import { isSweeping, sweepOpenTickets } from "./sweep";
 import { clearUnreachable, unreachableCount } from "./unreachable";
@@ -115,6 +119,7 @@ async function handleMessage(message: any, source: string, retriesLeft = 2) {
         // can try again, but count it: the gate stops after a couple of rounds so one
         // broken ticket cannot keep firing interactions for as long as it stays open.
         release(target.channelId);
+        recordRejection();
         const rounds = noteRejection(target.channelId);
         logger.error(`The bot ignored every press in #${target.channelName} (round ${rounds})`);
         toastFailure(`Bot did not respond: #${target.channelName}`);
@@ -128,6 +133,7 @@ async function handleMessage(message: any, source: string, retriesLeft = 2) {
         return;
     }
 
+    recordPress(result === "joined");
     trackDraw(target.channelId, target.channelName, settings.drawWatchWindowMs);
     toastSuccess(result === "joined"
         ? `Joined queue: #${target.channelName}`
@@ -141,6 +147,7 @@ function handleDraw(message: any, source: string) {
     const outcome = observeDraw(message, selfId, ticketBotId());
 
     if (outcome.kind === "lost") {
+        recordLoss();
         logger.info(`[${source}] draw on #${outcome.draw.channelName} went to ${outcome.winnerId}`);
         return;
     }
@@ -157,6 +164,7 @@ function handleDraw(message: any, source: string) {
 
     const { draw } = outcome;
 
+    recordWin();
     logger.info(`[${source}] WON #${draw.channelName} - deciding message: ${JSON.stringify(message?.components)}`);
 
     if (settings.notifyOnWin) {
@@ -329,6 +337,22 @@ function optionValue(args: any[], name: string, fallback: string): string {
     return value === undefined || value === null || value === "" ? fallback : String(value);
 }
 
+function statsReport(): string {
+    const s = getStats();
+    const rate = winRate();
+    const lines = [
+        `**This session** (${describeDuration(Date.now() - s.startedAt)} so far)`,
+        `**Presses sent:** ${s.pressesSent}${s.joinsConfirmed ? ` — ${s.joinsConfirmed} confirmed by the client` : ""}`,
+        `**Draws won:** ${s.wins}`,
+        `**Draws lost:** ${s.losses}`,
+        // Only resolved draws count; pending ones would drag the figure down for
+        // no reason other than that they have not finished yet.
+        `**Win rate:** ${rate === null ? "_no draws decided yet_" : `${Math.round(rate * 100)}% of ${s.wins + s.losses} decided`}`
+    ];
+    if (s.rejected > 0) lines.push(`**Tickets the bot would not accept:** ${s.rejected}`);
+    return lines.join("\n");
+}
+
 function statusReport(): string {
     const gates = gateStatus();
     const categories = [...parseIdList(settings.categoryIds)];
@@ -348,6 +372,13 @@ function statusReport(): string {
     // "This interaction failed" on the panel, with nothing logged here.
     const session = sessionStatus();
     lines.push(`**Gateway session:** ${session.held ? `held via ${session.source} — ${session.hint}` : "**NONE — presses cannot work**"}`);
+
+    if (gates.pausedForMs > 0) {
+        lines.push(`**Paused:** yes — ${describeDuration(gates.pausedForMs)} left (\`/taq resume\` to lift)`);
+    }
+    if (settings.maxConcurrentQueues > 0) {
+        lines.push(`**Open queues:** ${gates.openQueues} of ${settings.maxConcurrentQueues} allowed at once`);
+    }
 
     const period = settings.periodicSweepMs;
     const sinceSweep = lastAutoSweepAt ? `${Math.round((Date.now() - lastAutoSweepAt) / 1000)}s ago` : "never";
@@ -416,6 +447,7 @@ function testReport(channelId: string): string {
 export default {
     onLoad() {
         initSettings();
+        resetStats();
         resetInteractionWatch();
         startInteractionWatch();
         startActivityTracking(onReturnedToForeground);
@@ -440,7 +472,13 @@ export default {
             options: [
                 {
                     name: "action",
-                    description: "status = show config and gates, test = dry-run the matcher here, sweep = join queues on already-open tickets",
+                    description: "status, stats, test, sweep, pause, resume",
+                    type: OPTION_TYPE_STRING,
+                    required: false
+                },
+                {
+                    name: "for",
+                    description: "how long to pause, e.g. 30m, 2h, 90s (default 30m)",
                     type: OPTION_TYPE_STRING,
                     required: false
                 }
@@ -448,6 +486,25 @@ export default {
             execute(args: any[], ctx: any) {
                 const action = optionValue(args, "action", "status");
                 const channelId = ctx?.channel?.id;
+
+                if (action === "pause") {
+                    const requested = optionValue(args, "for", "30m");
+                    const ms = parseDuration(requested);
+                    if (ms === null) {
+                        return sendBotMessage(channelId, `Could not read a duration from \`${requested}\`. Try \`30m\`, \`2h\` or \`90s\`.`);
+                    }
+                    pauseFor(ms);
+                    return sendBotMessage(channelId, `Paused for **${describeDuration(ms)}**. Nothing will be joined until then; \`/taq resume\` lifts it early.`);
+                }
+
+                if (action === "resume") {
+                    resume();
+                    return sendBotMessage(channelId, "Resumed. Tickets will be joined again, subject to the usual gates.");
+                }
+
+                if (action === "stats") {
+                    return sendBotMessage(channelId, statsReport());
+                }
 
                 if (action === "sweep") {
                     sendBotMessage(channelId, "Sweeping already-open tickets, one at a time. Watch the debug log.");
