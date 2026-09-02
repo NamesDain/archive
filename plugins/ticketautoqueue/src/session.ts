@@ -80,6 +80,26 @@ export function forgetSessionId(): void {
     connectionOpens = 0;
     lastConnectionOpenAt = 0;
     seenEvents.clear();
+    sessionChanges = 0;
+}
+
+let sessionChanges = 0;
+
+/**
+ * Reconnects noticed by the session id changing rather than by a dispatch.
+ *
+ * None of the seven candidate connect events fire on current Discord iOS - a
+ * device reported "none since load" with all of them subscribed. But the id
+ * itself was observed changing between two status calls minutes apart, and a new
+ * id means a new connection. Polling for that change detects a reconnect without
+ * depending on the name of an event nobody has identified yet.
+ */
+export function noteSessionChange(): void {
+    sessionChanges++;
+}
+
+export function sessionChangeCount(): number {
+    return sessionChanges;
 }
 
 /** Which connect events this build fires, most frequent first. */
