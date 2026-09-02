@@ -373,6 +373,13 @@ function statusReport(): string {
     const session = sessionStatus();
     lines.push(`**Gateway session:** ${session.held ? `held via ${session.source} — ${session.hint}` : "**NONE — presses cannot work**"}`);
 
+    // Whether this dispatch fires at all decides two things: where the session id
+    // comes from, and whether the reconnect sweep ever runs. "never" alongside a
+    // session held by module lookup means neither is happening.
+    lines.push(`**Gateway connects seen:** ${session.connectionOpens === 0
+        ? "**none since load** — reconnect sweeps cannot fire; foreground sweeps still can"
+        : `${session.connectionOpens}, last ${describeDuration(Date.now() - session.lastConnectionOpenAt)} ago`}`);
+
     if (gates.pausedForMs > 0) {
         lines.push(`**Paused:** yes — ${describeDuration(gates.pausedForMs)} left (\`/taq resume\` to lift)`);
     }
@@ -384,9 +391,14 @@ function statusReport(): string {
     const sinceSweep = lastAutoSweepAt ? `${Math.round((Date.now() - lastAutoSweepAt) / 1000)}s ago` : "never";
     lines.push(`**Auto sweep:** ${period > 0 ? `every ${Math.round(Math.max(AUTO_SWEEP_MIN_GAP_MS, period) / 1000)}s` : "off"}, on reconnect ${settings.sweepOnReconnect ? "on" : "off"} - last ran ${sinceSweep}`);
 
+    // With no press yet there is nothing for the client to have reported, so
+    // saying confirmation is unavailable would be reading failure into silence.
+    const pressed = getStats().pressesSent;
     lines.push(`**Press confirmation:** ${outcomeReportingSeen()
-        ? "on — a join is only reported once the client confirms it"
-        : "_not seen yet on this build; presses report as sent, not joined_"}`);
+        ? "working — a join is only reported once the client confirms it"
+        : pressed === 0
+            ? "_unknown until the first press this session_"
+            : `_${pressed} press(es) sent, none confirmed — this build may not report outcomes_`}`);
 
     const givenUp = rejectionCount();
     if (givenUp > 0) lines.push(`**Given up on:** ${givenUp} ticket(s) the bot would not accept`);

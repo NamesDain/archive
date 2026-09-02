@@ -61,6 +61,7 @@ export function createMockVendetta({ modernComponents = true } = {}) {
     // once; leaving it silent would make every press in every test sit out the
     // full outcome timeout.
     const interactionOutcomes = [];
+    let moduleSessionId = null;
     const nextOutcome = () => (interactionOutcomes.length ? interactionOutcomes.shift() : "joined");
 
     const RestAPI = {
@@ -142,6 +143,10 @@ export function createMockVendetta({ modernComponents = true } = {}) {
         },
         metro: {
             findByProps(...props) {
+                // The client's live session id, as a module lookup would report it.
+                if (props.includes("getSessionId")) {
+                    return moduleSessionId === null ? undefined : { getSessionId: () => moduleSessionId };
+                }
                 if (props.includes("TableRowGroup")) {
                     return modernComponents
                         ? { TableRowGroup: "TableRowGroup", TableSwitchRow: "TableSwitchRow", TableRow: "TableRow" }
@@ -197,7 +202,12 @@ export function createMockVendetta({ modernComponents = true } = {}) {
         }
     };
 
-    return { vendetta, calls, fluxHandlers, registeredCommands, storage, stores, AppState, RestAPI, interactionOutcomes };
+    return {
+        vendetta, calls, fluxHandlers, registeredCommands, storage, stores, AppState, RestAPI,
+        interactionOutcomes,
+        /** Stands in for the client's own session id, which changes on every reconnect. */
+        setModuleSessionId(id) { moduleSessionId = id; }
+    };
 }
 
 /** Evaluates a built bundle exactly the way Kettu's VdPluginManager does. */
