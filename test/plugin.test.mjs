@@ -929,3 +929,126 @@ describe("catching up after the app was suspended", () => {
         c.plugin.onUnload();
     });
 });
+
+describe("pausing, limits and stats", () => {
+    function runCommand(c, action, extra = []) {
+        c.registeredCommands[0].execute(
+            [{ name: "action", value: action }, ...extra],
+            { channel: { id: TICKET_CHANNEL_ID } }
+        );
+        return c.calls.botMessages.at(-1).content;
+    }
+
+    it("pauses for a stated duration and joins nothing meanwhile", async () => {
+        const c = loadConfigured();
+
+        const reply = runCommand(c, "pause", [{ name: "for", value: "45m" }]);
+        assert.match(reply, /Paused for \*\*45 min\*\*/);
+
+        dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
+            message: makeTicketPanel({ id: "1000", channelId: TICKET_CHANNEL_ID, botId: BOT_ID })
+        });
+        await settle();
+
+        assert.equal(
+            c.calls.rest.filter(r => r.url === "/interactions").length,
+            0,
+            "a pause must actually stop presses, not just say so"
+        );
+        assert.match(runCommand(c, "status"), /\*\*Paused:\*\* yes/);
+        c.plugin.onUnload();
+    });
+
+    it("resumes on request", async () => {
+        const c = loadConfigured();
+        runCommand(c, "pause", [{ name: "for", value: "1h" }]);
+        runCommand(c, "resume");
+
+        dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
+            message: makeTicketPanel({ id: "1001", channelId: TICKET_CHANNEL_ID, botId: BOT_ID })
+        });
+        await settle();
+
+        assert.ok(c.calls.rest.find(r => r.url === "/interactions"), "resume must lift the pause");
+        c.plugin.onUnload();
+    });
+
+    it("a pause survives a reload, since stepping away outlasts a restart", () => {
+        const c = loadConfigured();
+        runCommand(c, "pause", [{ name: "for", value: "30m" }]);
+        const until = c.storage.pausedUntil;
+
+        c.plugin.onUnload();
+        c.plugin.onLoad();
+
+        assert.equal(c.storage.pausedUntil, until, "the pause must not be cleared by initSettings");
+        c.plugin.onUnload();
+    });
+
+    it("rejects a duration it cannot read rather than guessing one", () => {
+        const c = loadConfigured();
+        const reply = runCommand(c, "pause", [{ name: "for", value: "a while" }]);
+
+        assert.match(reply, /Could not read a duration/);
+        assert.ok(!c.storage.pausedUntil, "nothing should be paused on a bad duration");
+        c.plugin.onUnload();
+    });
+
+    it("stops joining once the open-queue limit is reached", async () => {
+        const c = loadConfigured({ maxConcurrentQueues: 1 });
+
+        dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
+            message: makeTicketPanel({ id: "1010", channelId: TICKET_CHANNEL_ID, botId: BOT_ID })
+        });
+        await settle();
+        assert.equal(c.calls.rest.filter(r => r.url === "/interactions").length, 1);
+
+        // A second, different ticket while the first draw is still open.
+        const other = "555555555555555555";
+        c.stores.ChannelStore._channels.set(other, makeChannel({
+            id: other, name: "ticket-0002", parentId: CATEGORY_ID, guildId: GUILD_ID
+        }));
+        dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
+            message: makeTicketPanel({ id: "1011", channelId: other, botId: BOT_ID })
+        });
+        await settle();
+
+        assert.equal(
+            c.calls.rest.filter(r => r.url === "/interactions").length,
+            1,
+            "the limit counts open draws, so the second ticket must be declined"
+        );
+        assert.match(runCommand(c, "status"), /Open queues:\*\* 1 of 1/);
+        c.plugin.onUnload();
+    });
+
+    it("has no limit by default", async () => {
+        const c = loadConfigured();
+        assert.equal(c.storage.maxConcurrentQueues, 0, "declining tickets must be opt-in");
+        c.plugin.onUnload();
+    });
+
+    it("reports session stats, counting only decided draws in the win rate", async () => {
+        const c = loadConfigured();
+
+        dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
+            message: makeTicketPanel({ id: "1020", channelId: TICKET_CHANNEL_ID, botId: BOT_ID })
+        });
+        await settle();
+
+        const announce = text => ({
+            id: "1021",
+            channel_id: TICKET_CHANNEL_ID,
+            author: { id: BOT_ID },
+            content: "",
+            components: [{ type: 17, components: [{ type: 10, content: text }] }]
+        });
+        dispatch(c.fluxHandlers, "MESSAGE_CREATE", { message: announce(`Selected staff: <@${SELF_ID}>`) });
+
+        const report = runCommand(c, "stats");
+        assert.match(report, /\*\*Presses sent:\*\* 1/);
+        assert.match(report, /\*\*Draws won:\*\* 1/);
+        assert.match(report, /100% of 1 decided/);
+        c.plugin.onUnload();
+    });
+});

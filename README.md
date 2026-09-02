@@ -46,11 +46,25 @@ ticket channel to dry-run the matcher against the panel there without pressing a
 
 | Command | Does |
 | --- | --- |
-| `/taq status` | Config, gate state, pending draws, last sweep. Also the default with no argument. |
-| `/taq test` | Dry-runs the matcher against the most recent panel in the current channel. Reports every button it found and why it would or would not press. |
+| `/taq status` | Config, gate state, pending draws, last sweep, whether press confirmation works on this build. The default with no argument. |
+| `/taq stats` | Presses, wins, losses and win rate for this session. |
+| `/taq test` | Dry-runs the matcher against the most recent panel in the current channel. Reports every button it found, its real field names, and why it would or would not press. |
 | `/taq sweep` | Joins queues on tickets that are already open, one at a time. |
+| `/taq pause for:30m` | Stops joining for a while. Accepts `90s`, `45m`, `2h`, or a bare number of minutes; defaults to 30 minutes. Survives a restart. |
+| `/taq resume` | Lifts a pause early. |
 
-All three reply with a bot message only you can see.
+They all reply with a bot message only you can see.
+
+**Pause rather than disarming** when you step away: a pause states when it ends and
+comes back on its own, where Armed stays off until you remember it. Claiming a ticket
+you cannot service is the failure this plugin exists to avoid.
+
+### Not taking on too much at once
+
+**Most queues at once** caps how many draws you can be in simultaneously. It counts
+open draws, not tickets touched, so a resolved one stops occupying a slot. It is `0`
+(no limit) by default — declining a ticket somebody expected to be claimed is worse
+than being in one queue too many, so the limit is opt-in.
 
 ## What changed from the desktop version
 
@@ -83,16 +97,26 @@ floored at one a minute, so that is at most one extra request per guild per minu
 no store accessor answers.
 
 **Settings.** Vencord generated the settings page from the settings declaration. Vendetta plugins
-ship their own component, so the page is written out by hand. Every numeric field is a text box —
-React Native has no number input — and commits on blur rather than per keystroke, so a
-half-deleted value never reaches the gates as `NaN`.
+ship their own component, so the page is written out by hand, on Discord's current table
+components. Values are edited in fields on the page rather than a dialog: Kettu's `showInputAlert`
+renders inside a legacy alert that no longer exists on current Discord iOS, and tapping a row that
+used it crashed the app. Numeric fields hold a draft and commit only a valid parse, so a
+half-typed value never reaches the gates as `NaN`.
 
-### One thing worth knowing
+### Catching up after the app has been away
 
-The gateway drops whenever the OS suspends the app, and JS stops running with it. On mobile this
-plugin can only join a queue while Discord is open in front of you; it will not quietly work a
-queue from your pocket. **Sweep after reconnect** is on by default because that is what catches
-tickets opened while the app was suspended, and it matters much more here than it did on desktop.
+While Discord is backgrounded its gateway connection drops and its timers stop, so tickets opened
+in that window arrive as no event at all. Exactly how long the OS allows before that happens is not
+something this project has measured — treat it as "expect gaps", not as a precise limit.
+
+What the plugin does about it: both a gateway reconnect **and** a return to the foreground trigger
+a catch-up sweep, each wake gets one sweep even if another ran moments earlier, and the sweep can
+list channels over REST when the store is still cold. A draw closes in roughly a minute, so the
+wake path is deliberately quick.
+
+Anything still open when you come back should be caught. A draw that opened and closed entirely
+while the app was away cannot be — no code running inside Discord can press a button during a
+window in which it was not running.
 
 ## Development
 

@@ -236,6 +236,11 @@ export default function Settings() {
                     <NumberSetting setting="minDelayMs" label="Minimum delay before pressing" hint="milliseconds" />
                     <NumberSetting setting="maxDelayMs" label="Maximum delay before pressing" hint="milliseconds" />
                     <NumberSetting setting="cooldownMs" label="Cooldown between presses" hint="milliseconds" />
+                    <NumberSetting
+                        setting="maxConcurrentQueues"
+                        label="Most queues at once"
+                        hint="0 for no limit"
+                    />
                 </Group>
 
                 <Group title="Catching up on missed tickets">

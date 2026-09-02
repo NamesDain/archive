@@ -17,6 +17,7 @@
 
 import { FluxDispatcher, ReactNative } from "@vendetta/metro/common";
 
+import { pendingDraws } from "./draws";
 import { parseHourWindow, withinWindow } from "./hours";
 import { settings, settingText } from "./settings";
 
@@ -99,6 +100,22 @@ export function isForeground(): boolean {
     return !currentState || currentState === "active";
 }
 
+/** Milliseconds left on a manual pause, or 0 when not paused. */
+export function pausedRemainingMs(now = Date.now()): number {
+    const until = Number(settings.pausedUntil);
+    if (!Number.isFinite(until) || until <= now) return 0;
+    return until - now;
+}
+
+export function pauseFor(ms: number): number {
+    settings.pausedUntil = Date.now() + ms;
+    return settings.pausedUntil;
+}
+
+export function resume(): void {
+    settings.pausedUntil = 0;
+}
+
 /** The configured window, or null when unset or unparseable - both mean no restriction. */
 export function hourWindow() {
     return parseHourWindow(settingText(settings.activeHours));
@@ -110,6 +127,21 @@ export function withinActiveHours(at: Date = new Date()): boolean {
 
 export function allow(channelId: string): GateResult {
     if (!settings.armed) return { ok: false, reason: "plugin is disarmed" };
+
+    const pausedFor = pausedRemainingMs();
+    if (pausedFor > 0) {
+        return { ok: false, reason: `paused for another ${Math.ceil(pausedFor / 60000)} min` };
+    }
+
+    // Counted from live draws rather than from every channel joined this session,
+    // because a ticket whose draw has resolved is no longer occupying you.
+    const limit = settings.maxConcurrentQueues;
+    if (limit > 0) {
+        const open = pendingDraws().length;
+        if (open >= limit) {
+            return { ok: false, reason: `already in ${open} open queue(s), limit is ${limit}` };
+        }
+    }
     if (!withinActiveHours()) {
         return { ok: false, reason: `outside active hours (${settings.activeHours})` };
     }
@@ -174,6 +206,8 @@ export function gateStatus() {
         idleForMs: Date.now() - lastActivity,
         joinedCount: joined.size,
         hoursConfigured: hourWindow() !== null,
-        withinHours: withinActiveHours()
+        withinHours: withinActiveHours(),
+        pausedForMs: pausedRemainingMs(),
+        openQueues: pendingDraws().length
     };
 }
