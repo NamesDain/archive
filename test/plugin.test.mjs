@@ -173,6 +173,8 @@ describe("loading", () => {
         assert.equal(fluxHandlers.get("MESSAGE_CREATE").size, 1);
         assert.equal(fluxHandlers.get("MESSAGE_UPDATE").size, 1);
         assert.equal(fluxHandlers.get("CONNECTION_OPEN").size, 1);
+        assert.equal(fluxHandlers.get("READY").size, 1, "READY is a candidate connect event too");
+        assert.equal(fluxHandlers.get("RESUMED").size, 1);
         assert.equal(fluxHandlers.get("CHANNEL_SELECT").size, 1);
         assert.equal(registeredCommands.length, 1);
         assert.equal(registeredCommands[0].name, "taq");
@@ -181,6 +183,8 @@ describe("loading", () => {
         assert.equal(fluxHandlers.get("MESSAGE_CREATE").size, 0);
         assert.equal(fluxHandlers.get("MESSAGE_UPDATE").size, 0);
         assert.equal(fluxHandlers.get("CONNECTION_OPEN").size, 0);
+        assert.equal(fluxHandlers.get("READY").size, 0, "every connect subscription must be removed");
+        assert.equal(fluxHandlers.get("RESUMED").size, 0);
         assert.equal(fluxHandlers.get("CHANNEL_SELECT").size, 0);
         assert.equal(registeredCommands.length, 0);
     });
@@ -1171,5 +1175,108 @@ describe("the gateway session id", () => {
             /Press confirmation:\*\* _unknown until the first press/
         );
         c.plugin.onUnload();
+    });
+});
+
+describe("finding the gateway connect event this build uses", () => {
+    // A device reported "Gateway connects seen: none since load" while plainly
+    // reconnecting, so CONNECTION_OPEN does not fire there and the reconnect
+    // sweep never ran. Every plausible name is subscribed, and status names the
+    // ones that actually arrive rather than leaving it to be guessed.
+    for (const [event, payload, expectedId] of [
+        ["READY", { session_id: "from-ready" }, "from-ready"],
+        ["RESUMED", { sessionId: "from-resumed" }, "from-resumed"],
+        ["SESSION_REPLACE", { session_id: "from-replace" }, "from-replace"],
+        ["CONNECTION_OPEN_SUPPLEMENTAL", { sessionId: "from-supplemental" }, "from-supplemental"]
+    ]) {
+        it(`takes the session id from ${event}`, async () => {
+            const c = loadConfigured();
+            dispatch(c.fluxHandlers, event, payload);
+
+            dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
+                message: makeTicketPanel({ id: `12${event.length}`, channelId: TICKET_CHANNEL_ID, botId: BOT_ID })
+            });
+            await settle();
+
+            assert.equal(
+                c.calls.rest.find(r => r.url === "/interactions").body.session_id,
+                expectedId
+            );
+            c.plugin.onUnload();
+        });
+    }
+
+    it("reads a session id nested inside a READY payload", async () => {
+        const c = loadConfigured();
+        dispatch(c.fluxHandlers, "READY", { ready: { session_id: "nested" } });
+
+        dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
+            message: makeTicketPanel({ id: "1300", channelId: TICKET_CHANNEL_ID, botId: BOT_ID })
+        });
+        await settle();
+
+        assert.equal(
+            c.calls.rest.find(r => r.url === "/interactions").body.session_id,
+            "nested"
+        );
+        c.plugin.onUnload();
+    });
+
+    it("names the events that fired, so the right one can be identified", () => {
+        const c = loadConfigured();
+        dispatch(c.fluxHandlers, "READY", { session_id: "x" });
+        dispatch(c.fluxHandlers, "RESUMED", {});
+        dispatch(c.fluxHandlers, "RESUMED", {});
+
+        c.registeredCommands[0].execute(
+            [{ name: "action", value: "status" }],
+            { channel: { id: TICKET_CHANNEL_ID } }
+        );
+        const report = c.calls.botMessages.at(-1).content;
+
+        // Sorted by frequency, so the one carrying the connection stands out.
+        assert.match(report, /RESUMED×2/);
+        assert.match(report, /READY×1/);
+        c.plugin.onUnload();
+    });
+
+    it("sweeps on a connect event that is not CONNECTION_OPEN", async () => {
+        // Built without loadConfigured, which dispatches CONNECTION_OPEN itself and
+        // would schedule the sweep this test is trying to attribute to READY.
+        const c = createMockVendetta();
+        const plugin = evalPlugin(BUNDLE, c.vendetta);
+        plugin.onLoad();
+        Object.assign(c.storage, {
+            categoryIds: CATEGORY_ID, ticketBotId: BOT_ID,
+            minDelayMs: 0, maxDelayMs: 0, cooldownMs: 0
+        });
+        c.stores.ChannelStore._channels.set(CATEGORY_ID, makeChannel({
+            id: CATEGORY_ID, name: "support", parentId: null, guildId: GUILD_ID
+        }));
+        c.stores.GuildChannelStore._byGuild.set(GUILD_ID, {
+            SELECTABLE: [{ channel: makeChannel({
+                id: snowflakeNow(), name: "ticket-0001", parentId: CATEGORY_ID, guildId: GUILD_ID
+            }) }]
+        });
+
+        const statusNow = () => {
+            c.registeredCommands[0].execute(
+                [{ name: "action", value: "status" }],
+                { channel: { id: TICKET_CHANNEL_ID } }
+            );
+            return c.calls.botMessages.at(-1).content;
+        };
+
+        assert.match(statusNow(), /last ran never/, "nothing should have swept before the connect");
+
+        dispatch(c.fluxHandlers, "READY", { session_id: "ready-session" });
+        await new Promise(r => setTimeout(r, 3600));
+
+        assert.doesNotMatch(
+            statusNow(),
+            /last ran never/,
+            "a non-CONNECTION_OPEN connect must still drive the catch-up sweep"
+        );
+        plugin.onUnload();
     });
 });
