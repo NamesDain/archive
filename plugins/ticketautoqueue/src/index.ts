@@ -19,7 +19,7 @@ import {
 } from "./gates";
 import { outcomeReportingSeen, resetInteractionWatch, startInteractionWatch, stopInteractionWatch } from "./interactions";
 import { collectButtons, customIdOf, matchTicket } from "./matcher";
-import { forgetSessionId, rememberSessionId, sessionStatus } from "./session";
+import { CONNECT_EVENTS, forgetSessionId, observedConnectEvents, rememberSessionId, sessionStatus } from "./session";
 import { initSettings, parseIdList, parseLabelList, settings, ticketBotId } from "./settings";
 import {
     describeDuration, getStats, parseDuration, recordLoss, recordPress, recordRejection, recordWin,
@@ -299,18 +299,26 @@ function findMessage(channelId: string, messageId: string): any {
 
 // Fires on the initial connect as well as on every resume. The shared gap floor
 // in autoSweep is what stops that first one duplicating the startup sweep.
-function onConnectionOpen(event: any) {
+function makeConnectHandler(eventName: string) {
+    return (event: any) => onGatewayConnect(eventName, event);
+}
+
+const connectHandlers = new Map<string, (event: any) => void>(
+    CONNECT_EVENTS.map(name => [name, makeConnectHandler(name)])
+);
+
+function onGatewayConnect(eventName: string, event: any) {
     try {
         // Do this before the sweepOnReconnect check: the session id is needed to press
         // anything at all, whether or not this connect triggers a sweep.
-        rememberSessionId(event);
+        rememberSessionId(eventName, event);
 
         if (!settings.sweepOnReconnect) return;
         if (reconnectSweepTimer !== null) clearTimeout(reconnectSweepTimer);
         sweptSinceWake = false;
         reconnectSweepTimer = setTimeout(() => void autoSweep("reconnect"), WAKE_SETTLE_MS);
     } catch (err) {
-        logger.error("CONNECTION_OPEN handler threw:", err);
+        logger.error(`${eventName} handler threw:`, err);
     }
 }
 
@@ -378,7 +386,7 @@ function statusReport(): string {
     // session held by module lookup means neither is happening.
     lines.push(`**Gateway connects seen:** ${session.connectionOpens === 0
         ? "**none since load** — reconnect sweeps cannot fire; foreground sweeps still can"
-        : `${session.connectionOpens}, last ${describeDuration(Date.now() - session.lastConnectionOpenAt)} ago`}`);
+        : `${observedConnectEvents().join(", ")} — last ${describeDuration(Date.now() - session.lastConnectionOpenAt)} ago`}`);
 
     if (gates.pausedForMs > 0) {
         lines.push(`**Paused:** yes — ${describeDuration(gates.pausedForMs)} left (\`/taq resume\` to lift)`);
@@ -466,7 +474,7 @@ export default {
 
         FluxDispatcher.subscribe("MESSAGE_CREATE", onMessageCreate);
         FluxDispatcher.subscribe("MESSAGE_UPDATE", onMessageUpdate);
-        FluxDispatcher.subscribe("CONNECTION_OPEN", onConnectionOpen);
+        for (const [name, handler] of connectHandlers) FluxDispatcher.subscribe(name, handler);
 
         awayCheckTimer = setInterval(() => {
             // An exception here would kill the interval for the rest of the session.
@@ -552,7 +560,7 @@ export default {
     onUnload() {
         FluxDispatcher.unsubscribe("MESSAGE_CREATE", onMessageCreate);
         FluxDispatcher.unsubscribe("MESSAGE_UPDATE", onMessageUpdate);
-        FluxDispatcher.unsubscribe("CONNECTION_OPEN", onConnectionOpen);
+        for (const [name, handler] of connectHandlers) FluxDispatcher.unsubscribe(name, handler);
 
         if (startSweepTimer !== null) clearTimeout(startSweepTimer);
         startSweepTimer = null;

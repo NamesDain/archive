@@ -29,16 +29,49 @@ let fromConnectionOpen: string | null = null;
 let connectionOpens = 0;
 let lastConnectionOpenAt = 0;
 
+/** Which of the candidate events this build actually dispatches, and how often. */
+const seenEvents = new Map<string, number>();
+
+/**
+ * Every dispatch that might mean "the gateway just came up".
+ *
+ * CONNECTION_OPEN is what the desktop client fires and what this plugin was
+ * written against, but a device reported "Gateway connects seen: none since
+ * load" while plainly reconnecting - so it does not fire here, and the reconnect
+ * sweep never ran. Rather than guess which name replaced it, all the plausible
+ * ones are subscribed and the status command reports which actually arrive.
+ * Extra subscriptions cost nothing; a missing one costs every catch-up sweep.
+ */
+export const CONNECT_EVENTS = [
+    "CONNECTION_OPEN",
+    "CONNECTION_OPEN_SUPPLEMENTAL",
+    "READY",
+    "READY_SUPPLEMENTAL",
+    "RESUMED",
+    "SESSION_REPLACE",
+    "GATEWAY_CONNECTED"
+] as const;
+
 /**
  * Called from the CONNECTION_OPEN handler. Every connect issues a fresh id, so a
  * connect that carries none must clear the previous one rather than leave it
  * standing - the old id is dead either way.
  */
-export function rememberSessionId(event: any): void {
+export function rememberSessionId(eventName: string, event: any): void {
     connectionOpens++;
     lastConnectionOpenAt = Date.now();
+    seenEvents.set(eventName, (seenEvents.get(eventName) ?? 0) + 1);
 
-    const id = event?.sessionId ?? event?.session_id ?? event?.sessionID;
+    // READY nests the payload; the others carry it flat, under either spelling.
+    const id = event?.sessionId
+        ?? event?.session_id
+        ?? event?.sessionID
+        ?? event?.ready?.session_id
+        ?? event?.d?.session_id;
+
+    // A connect that carries no id clears the previous one rather than leaving it
+    // standing: a new connection invalidates the old id either way, and the live
+    // lookup below is a better answer than a dead value.
     fromConnectionOpen = id ? String(id) : null;
 }
 
@@ -46,6 +79,14 @@ export function forgetSessionId(): void {
     fromConnectionOpen = null;
     connectionOpens = 0;
     lastConnectionOpenAt = 0;
+    seenEvents.clear();
+}
+
+/** Which connect events this build fires, most frequent first. */
+export function observedConnectEvents(): string[] {
+    return [...seenEvents.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .map(([name, count]) => `${name}×${count}`);
 }
 
 export function getSessionId(): string | null {
