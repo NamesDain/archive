@@ -114,12 +114,16 @@ What the plugin does about it: a return to the foreground triggers a catch-up sw
 one sweep even if another ran moments earlier, and the sweep can list channels over REST when the
 store is still cold. A draw closes in roughly a minute, so the wake path is deliberately quick.
 
-Reconnects are noticed by watching the gateway session id change, not by a dispatch. On current
-Discord iOS none of the usual connect events fire — `CONNECTION_OPEN`, `READY`, `RESUMED` and
-several others were all subscribed and none arrived — so the reconnect sweep never ran at all. A
-session id belongs to one connection, so a new one is proof the old connection went away, and the
-plugin already polls often enough to spot it. `/taq status` reports how many reconnects were caught
-this way, and names the connect event instead if one ever does fire.
+Reconnects are caught two ways. Current Discord iOS fires **`CONNECTION_RESUMED`** and
+**`SESSIONS_REPLACE`**, not the `CONNECTION_OPEN` the desktop client uses — and not the `RESUMED`
+or `SESSION_REPLACE` that guessing produced, both wrong by one word. `/taq events` found the real
+names by watching the dispatcher, which is the only reliable way to learn them.
+
+The backstop stays regardless: a gateway session id belongs to one connection, so a new one is
+proof the old connection went away, and the plugin polls often enough to notice. That needs no
+event name at all, and it is what kept catch-up working while the names were still unknown.
+`/taq status` names whichever connect events fire, and counts the reconnects caught by session
+change instead.
 
 Anything still open when you come back should be caught. A draw that opened and closed entirely
 while the app was away cannot be — no code running inside Discord can press a button during a

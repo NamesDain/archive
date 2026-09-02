@@ -36,15 +36,26 @@ const seenEvents = new Map<string, number>();
  * Every dispatch that might mean "the gateway just came up".
  *
  * CONNECTION_OPEN is what the desktop client fires and what this plugin was
- * written against, but a device reported "Gateway connects seen: none since
- * load" while plainly reconnecting - so it does not fire here, and the reconnect
- * sweep never ran. Rather than guess which name replaced it, all the plausible
- * ones are subscribed and the status command reports which actually arrive.
- * Extra subscriptions cost nothing; a missing one costs every catch-up sweep.
+ * written against, but it does not fire on current Discord iOS, so the reconnect
+ * sweep never ran there. Guessing replacements got close twice and missed both
+ * times; /taq events watched the dispatcher instead and named the real ones:
+ *
+ *   CONNECTION_RESUMED  - not RESUMED
+ *   SESSIONS_REPLACE    - not SESSION_REPLACE, and plural
+ *
+ * The near-misses are kept: they cost one subscription each, other builds may
+ * well use them, and this list being wrong is what caused the original problem.
+ *
+ * SESSIONS_REPLACE is the user's session list being replaced, which also happens
+ * when another device connects, so it can fire without this client reconnecting.
+ * That is acceptable - a wake buys one sweep, and everything after it obeys the
+ * usual floor - but it is why CONNECTION_RESUMED is the one to trust.
  */
 export const CONNECT_EVENTS = [
     "CONNECTION_OPEN",
     "CONNECTION_OPEN_SUPPLEMENTAL",
+    "CONNECTION_RESUMED",
+    "SESSIONS_REPLACE",
     "READY",
     "READY_SUPPLEMENTAL",
     "RESUMED",

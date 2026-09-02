@@ -1478,3 +1478,78 @@ describe("when the client never reports an outcome", () => {
         c.plugin.onUnload();
     });
 });
+
+describe("the connect events this build really fires", () => {
+    // Found by /taq events on a device, not by guessing: the seven candidates in
+    // the previous round included RESUMED and SESSION_REPLACE, and the real names
+    // are CONNECTION_RESUMED and SESSIONS_REPLACE. Both near-misses by one word.
+    it("subscribes to the names the probe actually observed", () => {
+        const { vendetta, fluxHandlers } = createMockVendetta();
+        const plugin = evalPlugin(BUNDLE, vendetta);
+        plugin.onLoad();
+
+        assert.equal(fluxHandlers.get("CONNECTION_RESUMED").size, 1);
+        assert.equal(fluxHandlers.get("SESSIONS_REPLACE").size, 1);
+
+        plugin.onUnload();
+        assert.equal(fluxHandlers.get("CONNECTION_RESUMED").size, 0);
+        assert.equal(fluxHandlers.get("SESSIONS_REPLACE").size, 0);
+    });
+
+    it("sweeps on CONNECTION_RESUMED", async () => {
+        const c = createMockVendetta();
+        const plugin = evalPlugin(BUNDLE, c.vendetta);
+        plugin.onLoad();
+        Object.assign(c.storage, {
+            categoryIds: CATEGORY_ID, ticketBotId: BOT_ID,
+            minDelayMs: 0, maxDelayMs: 0, cooldownMs: 0
+        });
+        c.stores.ChannelStore._channels.set(CATEGORY_ID, makeChannel({
+            id: CATEGORY_ID, name: "support", parentId: null, guildId: GUILD_ID
+        }));
+        c.stores.GuildChannelStore._byGuild.set(GUILD_ID, {
+            SELECTABLE: [{ channel: makeChannel({
+                id: snowflakeNow(), name: "ticket-0001", parentId: CATEGORY_ID, guildId: GUILD_ID
+            }) }]
+        });
+        const status = () => {
+            c.registeredCommands[0].execute(
+                [{ name: "action", value: "status" }],
+                { channel: { id: TICKET_CHANNEL_ID } }
+            );
+            return c.calls.botMessages.at(-1).content;
+        };
+
+        assert.match(status(), /last ran never/);
+
+        dispatch(c.fluxHandlers, "CONNECTION_RESUMED", {});
+        await new Promise(r => setTimeout(r, 3600));
+
+        assert.doesNotMatch(status(), /last ran never/, "a resume must drive the catch-up sweep");
+        assert.match(status(), /CONNECTION_RESUMED×1/, "and be named in the report");
+        plugin.onUnload();
+    });
+
+    it("does not take a session id from SESSIONS_REPLACE, which carries other devices'", async () => {
+        const c = loadConfigured();
+        c.setModuleSessionId("live-session");
+
+        // The payload lists every session on the account. None of them is this
+        // connection's gateway id, and reading one would send presses under it.
+        dispatch(c.fluxHandlers, "SESSIONS_REPLACE", {
+            sessions: [{ sessionId: "another-device" }, { sessionId: "a-third" }]
+        });
+
+        dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
+            message: makeTicketPanel({ id: "1500", channelId: TICKET_CHANNEL_ID, botId: BOT_ID })
+        });
+        await settle();
+
+        assert.equal(
+            c.calls.rest.find(r => r.url === "/interactions").body.session_id,
+            "live-session",
+            "the live id must win over anything in a sessions list"
+        );
+        c.plugin.onUnload();
+    });
+});
