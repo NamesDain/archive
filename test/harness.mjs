@@ -40,7 +40,17 @@ export function createMockVendetta({ modernComponents = true } = {}) {
     const registeredCommands = [];
     const storage = {};
 
+    const interceptors = [];
+
     const FluxDispatcher = {
+        addInterceptor(fn) { interceptors.push(fn); },
+        /** Runs an action past the interceptors, as the real dispatcher does first. */
+        _dispatchRaw(action) {
+            for (const fn of interceptors) {
+                if (fn(action)) return true;
+            }
+            return false;
+        },
         subscribe(event, handler) {
             if (!fluxHandlers.has(event)) fluxHandlers.set(event, new Set());
             fluxHandlers.get(event).add(handler);
@@ -205,6 +215,8 @@ export function createMockVendetta({ modernComponents = true } = {}) {
     return {
         vendetta, calls, fluxHandlers, registeredCommands, storage, stores, AppState, RestAPI,
         interactionOutcomes,
+        interceptors,
+        dispatchRaw: action => FluxDispatcher._dispatchRaw(action),
         /** Stands in for the client's own session id, which changes on every reconnect. */
         setModuleSessionId(id) { moduleSessionId = id; }
     };

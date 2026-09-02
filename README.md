@@ -52,6 +52,7 @@ ticket channel to dry-run the matcher against the panel there without pressing a
 | `/taq sweep` | Joins queues on tickets that are already open, one at a time. |
 | `/taq pause for:30m` | Stops joining for a while. Accepts `90s`, `45m`, `2h`, or a bare number of minutes; defaults to 30 minutes. Survives a restart. |
 | `/taq resume` | Lifts a pause early. |
+| `/taq events` | Watches the client's dispatcher for two minutes and names the connect, session and interaction dispatches it fires. Opt-in, self-stopping, and only for identifying events this build names differently. |
 
 They all reply with a bot message only you can see.
 

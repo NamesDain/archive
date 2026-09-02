@@ -17,8 +17,12 @@ import {
     allow, gateStatus, isOperatorActive, noteActivity, noteRejection, pauseFor, rejectionCount,
     release, reserve, resetGates, resume, startActivityTracking, stopActivityTracking, withinActiveHours
 } from "./gates";
-import { outcomeReportingSeen, resetInteractionWatch, startInteractionWatch, stopInteractionWatch } from "./interactions";
+import {
+    outcomeReportingRuledOut, outcomeReportingSeen, resetInteractionWatch, startInteractionWatch,
+    stopInteractionWatch
+} from "./interactions";
 import { collectButtons, customIdOf, matchTicket } from "./matcher";
+import { isCapturing, probeReport, resetProbe, startProbe } from "./probe";
 import {
     CONNECT_EVENTS, forgetSessionId, getSessionId, noteSessionChange, observedConnectEvents,
     rememberSessionId, sessionChangeCount, sessionStatus
@@ -36,6 +40,10 @@ import { alertWithJump, openChannel, toast, toastFailure, toastSuccess } from ".
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
 const OPTION_TYPE_STRING = 3;
+
+// Long enough to cover an app switch and a reconnect, short enough that nobody
+// leaves it running by accident.
+const PROBE_DURATION_MS = 120000;
 
 let startSweepTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectSweepTimer: ReturnType<typeof setTimeout> | null = null;
@@ -441,9 +449,11 @@ function statusReport(): string {
     const pressed = getStats().pressesSent;
     lines.push(`**Press confirmation:** ${outcomeReportingSeen()
         ? "working — a join is only reported once the client confirms it"
-        : pressed === 0
-            ? "_unknown until the first press this session_"
-            : `_${pressed} press(es) sent, none confirmed — this build may not report outcomes_`}`);
+        : outcomeReportingRuledOut()
+            ? `_this build does not report outcomes; no retries, and presses no longer wait for one_`
+            : pressed === 0
+                ? "_unknown until the first press this session_"
+                : `_${pressed} press(es) sent, none confirmed yet_`}`);
 
     const givenUp = rejectionCount();
     if (givenUp > 0) lines.push(`**Given up on:** ${givenUp} ticket(s) the bot would not accept`);
@@ -505,6 +515,7 @@ export default {
     onLoad() {
         initSettings();
         resetStats();
+        resetProbe();
         resetInteractionWatch();
         startInteractionWatch();
         startActivityTracking(onReturnedToForeground);
@@ -530,7 +541,7 @@ export default {
             options: [
                 {
                     name: "action",
-                    description: "status, stats, test, sweep, pause, resume",
+                    description: "status, stats, test, sweep, pause, resume, events",
                     type: OPTION_TYPE_STRING,
                     required: false
                 },
@@ -544,6 +555,21 @@ export default {
             execute(args: any[], ctx: any) {
                 const action = optionValue(args, "action", "status");
                 const channelId = ctx?.channel?.id;
+
+                if (action === "events") {
+                    // Answers, from observation rather than guesswork, which dispatch
+                    // means "connected" here and whether interaction outcomes fire.
+                    if (isCapturing()) return sendBotMessage(channelId, probeReport());
+
+                    const seconds = Math.round(PROBE_DURATION_MS / 1000);
+                    if (!startProbe(PROBE_DURATION_MS)) {
+                        return sendBotMessage(channelId, "This build gives no way to observe dispatches, so there is nothing to capture.");
+                    }
+                    return sendBotMessage(
+                        channelId,
+                        `Watching dispatches for ${seconds}s. Switch away from Discord and back, or let the connection drop, then run \`/taq events\` again for the list.`
+                    );
+                }
 
                 if (action === "pause") {
                     const requested = optionValue(args, "for", "30m");
@@ -613,6 +639,7 @@ export default {
         unregisterCommand = null;
 
         lastSeenSessionId = null;
+        resetProbe();
         stopInteractionWatch();
         stopActivityTracking();
         resetGates();

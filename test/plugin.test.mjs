@@ -1354,3 +1354,127 @@ describe("noticing a reconnect without a connect event", () => {
         c.plugin.onUnload();
     });
 });
+
+describe("naming the dispatches this build fires", () => {
+    function runCommand(c, action) {
+        c.registeredCommands[0].execute(
+            [{ name: "action", value: action }],
+            { channel: { id: TICKET_CHANNEL_ID } }
+        );
+        return c.calls.botMessages.at(-1).content;
+    }
+
+    // Two guesses have already been wrong here - which event means "connected",
+    // and whether interaction outcomes fire at all. This answers both by watching
+    // the dispatcher rather than proposing another name.
+    it("captures the dispatches that fire while watching", () => {
+        const c = loadConfigured();
+
+        assert.match(runCommand(c, "events"), /Watching dispatches/);
+
+        c.dispatchRaw({ type: "GATEWAY_SOCKET_OPEN" });
+        c.dispatchRaw({ type: "GATEWAY_SOCKET_OPEN" });
+        c.dispatchRaw({ type: "INTERACTION_CREATE" });
+
+        const report = runCommand(c, "events");
+        assert.match(report, /GATEWAY_SOCKET_OPEN` ×2/);
+        assert.match(report, /INTERACTION_CREATE` ×1/);
+        c.plugin.onUnload();
+    });
+
+    it("ignores the routine traffic that would bury the answer", () => {
+        const c = loadConfigured();
+        runCommand(c, "events");
+
+        c.dispatchRaw({ type: "MESSAGE_CREATE" });
+        c.dispatchRaw({ type: "TYPING_START" });
+        c.dispatchRaw({ type: "CHANNEL_SELECT" });
+
+        assert.match(runCommand(c, "events"), /nothing matching yet/);
+        c.plugin.onUnload();
+    });
+
+    it("never blocks a dispatch, whatever it sees", () => {
+        const c = loadConfigured();
+        runCommand(c, "events");
+
+        for (const type of ["CONNECTION_OPEN", "MESSAGE_CREATE", "INTERACTION_SUCCESS"]) {
+            assert.equal(c.dispatchRaw({ type }), false, `${type} must pass through`);
+        }
+        // A malformed action must not throw out of the dispatcher either.
+        assert.equal(c.dispatchRaw(null), false);
+        assert.equal(c.dispatchRaw({}), false);
+        c.plugin.onUnload();
+    });
+
+    it("captures nothing before it is asked to", () => {
+        const c = loadConfigured();
+        c.dispatchRaw({ type: "CONNECTION_OPEN" });
+
+        // Starting now clears anything from before, so the report covers only the
+        // window the user actually asked about.
+        runCommand(c, "events");
+        assert.match(runCommand(c, "events"), /nothing matching yet/);
+        c.plugin.onUnload();
+    });
+
+    it("says so when the dispatcher cannot be observed", () => {
+        const mock = createMockVendetta();
+        delete mock.vendetta.metro.common.FluxDispatcher.addInterceptor;
+        const plugin = evalPlugin(BUNDLE, mock.vendetta);
+        plugin.onLoad();
+
+        mock.registeredCommands[0].execute(
+            [{ name: "action", value: "events" }],
+            { channel: { id: TICKET_CHANNEL_ID } }
+        );
+
+        assert.match(mock.calls.botMessages.at(-1).content, /no way to observe dispatches/);
+        plugin.onUnload();
+    });
+});
+
+describe("when the client never reports an outcome", () => {
+    // Every press used to wait the full outcome timeout to rediscover this, which
+    // on a draw closing in about a minute is a quarter of the window, and in a
+    // sweep is paid once per channel.
+    it("waits once to establish it, then stops waiting", async () => {
+        const c = loadConfigured();
+        c.interactionOutcomes.push("silent", "silent");
+
+        // The press resolves only once the outcome wait ends, and the toast is what
+        // marks that. Wall-clock around dispatch measures nothing - it does not await
+        // the press - and the REST call fires before the wait, so counting requests
+        // cannot separate the two either.
+        dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
+            message: makeTicketPanel({ id: "1400", channelId: TICKET_CHANNEL_ID, botId: BOT_ID })
+        });
+
+        await settle();
+        assert.equal(c.calls.toasts.length, 0, "the first press waits to find out");
+
+        await silentPress();
+        assert.equal(c.calls.toasts.length, 1, "and reports once the wait is over");
+
+        const other = "777777777777777777";
+        c.stores.ChannelStore._channels.set(other, makeChannel({
+            id: other, name: "ticket-0003", parentId: CATEGORY_ID, guildId: GUILD_ID
+        }));
+        dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
+            message: makeTicketPanel({ id: "1401", channelId: other, botId: BOT_ID })
+        });
+
+        await settle();
+        assert.equal(
+            c.calls.toasts.length, 2,
+            "the second press must not wait again for an answer already known not to come"
+        );
+
+        c.registeredCommands[0].execute(
+            [{ name: "action", value: "status" }],
+            { channel: { id: TICKET_CHANNEL_ID } }
+        );
+        assert.match(c.calls.botMessages.at(-1).content, /does not report outcomes/);
+        c.plugin.onUnload();
+    });
+});
