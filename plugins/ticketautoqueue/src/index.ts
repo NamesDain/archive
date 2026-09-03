@@ -21,16 +21,17 @@ import {
     outcomeReportingRuledOut, outcomeReportingSeen, resetInteractionWatch, startInteractionWatch,
     stopInteractionWatch
 } from "./interactions";
+import { clearHistory, describe as describeEntry, record, recent } from "./history";
 import { collectButtons, customIdOf, matchTicket } from "./matcher";
 import { isCapturing, probeReport, resetProbe, startProbe } from "./probe";
 import {
     CONNECT_EVENTS, forgetSessionId, getSessionId, noteSessionChange, observedConnectEvents,
     rememberSessionId, sessionChangeCount, sessionStatus
 } from "./session";
-import { initSettings, parseIdList, parseLabelList, settings, ticketBotId } from "./settings";
+import { initSettings, parseIdList, parseLabelList, parsePattern, settings, ticketBotId } from "./settings";
 import {
-    describeDuration, getStats, parseDuration, recordLoss, recordPress, recordRejection, recordWin,
-    resetStats, winRate
+    Counters, describeDuration, getStats, lifetimeCounters, parseDuration, rateOf, recordLoss,
+    recordPress, recordRejection, recordWin, resetStats, todayCounters, winRate
 } from "./stats";
 import Settings from "./Settings";
 import { isSweeping, sweepOpenTickets } from "./sweep";
@@ -111,6 +112,7 @@ async function handleMessage(message: any, source: string, retriesLeft = 2) {
     const gate = allow(target.channelId);
     if (!gate.ok) {
         if (settings.verboseLogging) logger.info(`gate blocked #${target.channelName}: ${gate.reason}`);
+        record("blocked", target.channelName, gate.reason);
         return;
     }
 
@@ -120,6 +122,7 @@ async function handleMessage(message: any, source: string, retriesLeft = 2) {
     const recheck = allow(target.channelId);
     if (!recheck.ok) {
         if (settings.verboseLogging) logger.info(`gate blocked after delay #${target.channelName}: ${recheck.reason}`);
+        record("blocked", target.channelName, recheck.reason);
         return;
     }
 
@@ -136,6 +139,7 @@ async function handleMessage(message: any, source: string, retriesLeft = 2) {
         recordRejection();
         const rounds = noteRejection(target.channelId);
         logger.error(`The bot ignored every press in #${target.channelName} (round ${rounds})`);
+        record("rejected", target.channelName, `round ${rounds}`);
         toastFailure(`Bot did not respond: #${target.channelName}`);
         return;
     }
@@ -143,11 +147,13 @@ async function handleMessage(message: any, source: string, retriesLeft = 2) {
     if (result !== "joined" && result !== "sent") {
         release(target.channelId);
         logger.error(`Failed to press "${target.label}" in #${target.channelName} (${result})`);
+        record("failed", target.channelName, result);
         toastFailure(`TicketAutoQueue: failed on #${target.channelName}`);
         return;
     }
 
     recordPress(result === "joined");
+    record(result === "joined" ? "joined" : "pressed", target.channelName);
     trackDraw(target.channelId, target.channelName, settings.drawWatchWindowMs);
     toastSuccess(result === "joined"
         ? `Joined queue: #${target.channelName}`
@@ -158,10 +164,14 @@ function handleDraw(message: any, source: string) {
     const selfId = getCurrentUserId();
     if (!selfId) return;
 
-    const outcome = observeDraw(message, selfId, ticketBotId());
+    // A pattern that will not compile falls back to the built-in one rather than
+    // disabling win detection, which would fail silently and lose tickets.
+    const configured = parsePattern(settings.winnerPattern);
+    const outcome = observeDraw(message, selfId, ticketBotId(), Date.now(), configured ?? undefined);
 
     if (outcome.kind === "lost") {
         recordLoss();
+        record("lost", outcome.draw.channelName, `went to ${outcome.winnerId}`);
         logger.info(`[${source}] draw on #${outcome.draw.channelName} went to ${outcome.winnerId}`);
         return;
     }
@@ -179,6 +189,7 @@ function handleDraw(message: any, source: string) {
     const { draw } = outcome;
 
     recordWin();
+    record("won", draw.channelName);
     logger.info(`[${source}] WON #${draw.channelName} - deciding message: ${JSON.stringify(message?.components)}`);
 
     if (settings.notifyOnWin) {
@@ -389,6 +400,19 @@ function optionValue(args: any[], name: string, fallback: string): string {
     return value === undefined || value === null || value === "" ? fallback : String(value);
 }
 
+/** One line per horizon, so a shift can be read without a running session. */
+function countersLine(label: string, c: Counters): string {
+    const rate = rateOf(c);
+    const decided = c.wins + c.losses;
+    const parts = [
+        `${c.pressesSent} press${c.pressesSent === 1 ? "" : "es"}`,
+        `${c.wins}W/${c.losses}L`,
+        rate === null ? "no draws decided" : `${Math.round(rate * 100)}% of ${decided}`
+    ];
+    if (c.rejected > 0) parts.push(`${c.rejected} refused by the bot`);
+    return `**${label}:** ${parts.join(" · ")}`;
+}
+
 function statsReport(): string {
     const s = getStats();
     const rate = winRate();
@@ -402,6 +426,9 @@ function statsReport(): string {
         `**Win rate:** ${rate === null ? "_no draws decided yet_" : `${Math.round(rate * 100)}% of ${s.wins + s.losses} decided`}`
     ];
     if (s.rejected > 0) lines.push(`**Tickets the bot would not accept:** ${s.rejected}`);
+
+    // Discord restarts often on mobile, so a session rarely covers a whole shift.
+    lines.push("", countersLine("Today", todayCounters()), countersLine("All time", lifetimeCounters()));
     return lines.join("\n");
 }
 
@@ -515,6 +542,7 @@ export default {
     onLoad() {
         initSettings();
         resetStats();
+        clearHistory();
         resetProbe();
         resetInteractionWatch();
         startInteractionWatch();
@@ -541,7 +569,7 @@ export default {
             options: [
                 {
                     name: "action",
-                    description: "status, stats, test, sweep, pause, resume, events",
+                    description: "status, stats, recent, test, sweep, pause, resume, events",
                     type: OPTION_TYPE_STRING,
                     required: false
                 },
@@ -584,6 +612,17 @@ export default {
                 if (action === "resume") {
                     resume();
                     return sendBotMessage(channelId, "Resumed. Tickets will be joined again, subject to the usual gates.");
+                }
+
+                if (action === "recent") {
+                    const entries = recent();
+                    if (entries.length === 0) {
+                        return sendBotMessage(channelId, "Nothing decided yet this session. Panels the plugin never matched are not listed - they would bury the ones that matter.");
+                    }
+                    return sendBotMessage(channelId, [
+                        `**Last ${entries.length} decision(s)**`,
+                        ...entries.map(e => describeEntry(e))
+                    ].join("\n"));
                 }
 
                 if (action === "stats") {
@@ -639,6 +678,7 @@ export default {
         unregisterCommand = null;
 
         lastSeenSessionId = null;
+        clearHistory();
         resetProbe();
         stopInteractionWatch();
         stopActivityTracking();

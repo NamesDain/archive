@@ -28,6 +28,8 @@ export interface TaqSettings {
     cooldownMs: number;
     maxConcurrentQueues: number;
     pausedUntil: number;
+    statsJson: string;
+    winnerPattern: string;
     catchUpOnStart: boolean;
     periodicSweepMs: number;
     sweepOnReconnect: boolean;
@@ -62,6 +64,13 @@ export const DEFAULTS: Readonly<TaqSettings> = {
     // Epoch ms. Survives a reload deliberately: a pause you set because you
     // stepped away should not be undone by the app restarting.
     pausedUntil: 0,
+    // Today's and lifetime counters, as one JSON string - see stats.ts for why
+    // it is not a nested object.
+    statsJson: "",
+    // How the ticket bot announces the result. Configurable because the whole
+    // win path hangs off this one phrase, and a bot rewording it would otherwise
+    // need a plugin change rather than a settings change.
+    winnerPattern: "selected staff:?\\s*<@!?(\\d+)>",
     catchUpOnStart: false,
     periodicSweepMs: 0,
     sweepOnReconnect: true,

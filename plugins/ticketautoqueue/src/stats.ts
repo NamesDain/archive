@@ -6,12 +6,20 @@
  * Ported from the Vencord plugin of the same name.
  */
 
-// Zero imports, so this stays trivially testable and cannot pull the plugin's
-// state into a cycle.
+// Three horizons, because one does not answer the question on its own.
 //
-// Counters are per session on purpose. The question they answer is "is this
-// working for me right now" - after a restart the answer is about a new session,
-// and a persisted lifetime total would bury a run where nothing is landing.
+// Session answers "is it working right now", and is the one that matters while
+// debugging. But Discord restarts often on mobile, and a session that ends every
+// time the app is killed cannot describe a shift - which is what anyone actually
+// wants to know. So today and lifetime are kept alongside it, and persisted.
+//
+// They are stored as one JSON string rather than as nested objects in the plugin
+// storage. Writing into a nested object may or may not reach the backing store
+// depending on how deeply the proxy wraps, and stats that silently fail to save
+// would be worse than no stats at all. One string, written explicitly, cannot
+// have that problem.
+
+import { settings } from "./settings";
 
 export interface Stats {
     /** Presses Discord accepted for delivery, whether or not the bot then acted. */
@@ -27,7 +35,73 @@ export interface Stats {
     startedAt: number;
 }
 
+interface Persisted {
+    day: string;
+    today: Counters;
+    lifetime: Counters;
+}
+
+export interface Counters {
+    pressesSent: number;
+    joinsConfirmed: number;
+    rejected: number;
+    wins: number;
+    losses: number;
+}
+
 let stats: Stats = fresh();
+
+/** Local date, since a shift is bounded by the operator's day, not by UTC. */
+function todayKey(now = new Date()): string {
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+}
+
+function emptyCounters(): Counters {
+    return { pressesSent: 0, joinsConfirmed: 0, rejected: 0, wins: 0, losses: 0 };
+}
+
+function loadPersisted(): Persisted {
+    let stored: any;
+    try {
+        stored = JSON.parse(String(settings.statsJson ?? ""));
+    } catch {
+        stored = null;
+    }
+
+    const day = todayKey();
+    const lifetime = { ...emptyCounters(), ...(stored?.lifetime ?? {}) };
+
+    // A stored day that is not today belongs to a shift that has ended; its
+    // totals stay in lifetime and today starts again from zero.
+    const today = stored?.day === day
+        ? { ...emptyCounters(), ...(stored?.today ?? {}) }
+        : emptyCounters();
+
+    return { day, today, lifetime };
+}
+
+function savePersisted(p: Persisted): void {
+    try {
+        settings.statsJson = JSON.stringify(p);
+    } catch { /* a stat that will not save must not break a press */ }
+}
+
+/** Applies a change to every persisted horizon at once. */
+function bump(field: keyof Counters, by = 1): void {
+    const p = loadPersisted();
+    p.today[field] += by;
+    p.lifetime[field] += by;
+    savePersisted(p);
+}
+
+export function todayCounters(): Counters {
+    return loadPersisted().today;
+}
+
+export function lifetimeCounters(): Counters {
+    return loadPersisted().lifetime;
+}
 
 function fresh(): Stats {
     return {
@@ -46,19 +120,32 @@ export function resetStats(): void {
 
 export function recordPress(confirmed: boolean): void {
     stats.pressesSent++;
-    if (confirmed) stats.joinsConfirmed++;
+    bump("pressesSent");
+    if (confirmed) {
+        stats.joinsConfirmed++;
+        bump("joinsConfirmed");
+    }
 }
 
 export function recordRejection(): void {
     stats.rejected++;
+    bump("rejected");
 }
 
 export function recordWin(): void {
     stats.wins++;
+    bump("wins");
 }
 
 export function recordLoss(): void {
     stats.losses++;
+    bump("losses");
+}
+
+/** Win rate over any horizon. Only decided draws count, for the same reason. */
+export function rateOf(c: Counters): number | null {
+    const decided = c.wins + c.losses;
+    return decided === 0 ? null : c.wins / decided;
 }
 
 export function getStats(): Readonly<Stats> {

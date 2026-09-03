@@ -281,6 +281,21 @@ export default function Settings() {
                     />
                     <NumberSetting setting="drawWarningLeadMs" label="Warning lead time" hint="milliseconds" />
                     <NumberSetting setting="drawWatchWindowMs" label="Draw watch window" hint="milliseconds" />
+                    <TextSetting
+                        setting="winnerPattern"
+                        label="Winner announcement pattern"
+                        placeholder="selected staff:?\\s*<@!?(\\d+)>"
+                        describe={() => "Regex whose first group captures the winner's user ID"}
+                        validate={value => {
+                            if (!value) return "Needed to detect a win. Clear the field to restore the default.";
+                            const compiled = parsePattern(value);
+                            if (!compiled) return "Not a valid regular expression.";
+                            // Without a capture group it matches the announcement but
+                            // names nobody, which reads as a win for everyone.
+                            if (!/\(/.test(value)) return "Needs a capture group around the user ID, like (\\d+).";
+                            return undefined;
+                        }}
+                    />
                 </Group>
 
                 <Group title="Feedback">
