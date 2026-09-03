@@ -12,8 +12,9 @@
 // only as "This interaction failed" under the message.
 //
 // Vencord reads it straight off AuthenticationStore.getSessionId(). Mobile has no
-// such store, so the id comes from the CONNECTION_OPEN dispatch when that carries
-// one, and from a module lookup otherwise.
+// store by that name, but a module lookup does answer here, and that is the value
+// presses go out under. A connect dispatch's id is kept only for a build where no
+// lookup answers at all.
 //
 // Nothing here is cached. A session id belongs to one gateway connection and the
 // client issues a fresh one on every reconnect - which on mobile is every app
@@ -23,7 +24,13 @@
 
 import { findByProps, findByStoreName } from "@vendetta/metro";
 
-/** Only what CONNECTION_OPEN supplied; null once a connect arrives without one. */
+/**
+ * The id a connect dispatch supplied, kept only as a fallback.
+ *
+ * The live lookup is preferred over this, because this is a snapshot: it is
+ * right when it is written and wrong from the next reconnect onwards, and the
+ * client's own value is never either.
+ */
 let fromConnectionOpen: string | null = null;
 
 let connectionOpens = 0;
@@ -35,24 +42,27 @@ const seenEvents = new Map<string, number>();
 /**
  * Every dispatch that might mean "the gateway just came up".
  *
- * CONNECTION_OPEN is what the desktop client fires and what this plugin was
- * written against, but it does not fire on current Discord iOS, so the reconnect
- * sweep never ran there. Guessing replacements got close twice and missed both
- * times; /taq events watched the dispatcher instead and named the real ones:
+ * This list was guessed at twice and wrong twice, so it is now built from what a
+ * /taq events capture on the device actually recorded. A 15-minute window caught
+ * all of these, most frequent first:
  *
- *   CONNECTION_RESUMED  - not RESUMED
- *   SESSIONS_REPLACE    - not SESSION_REPLACE, and plural
+ *   SESSIONS_REPLACE ×16, CONNECTION_RESUMED ×11, POST_CONNECTION_OPEN ×4,
+ *   CONNECTION_OPEN ×3, CONNECTION_OPEN_SUPPLEMENTAL ×3
  *
- * The near-misses are kept: they cost one subscription each, other builds may
- * well use them, and this list being wrong is what caused the original problem.
+ * CONNECTION_OPEN does fire here after all. An earlier two-minute capture missed
+ * it and this file went on to state as fact that it never fires on current
+ * Discord iOS - it was a window too short to contain a reconnect, not evidence of
+ * absence. The near-misses from the guessing (RESUMED, SESSION_REPLACE) are kept:
+ * they cost one subscription each, other builds may use them, and this list being
+ * wrong is what caused the original problem.
  *
- * SESSIONS_REPLACE is the user's session list being replaced, which also happens
- * when another device connects, so it can fire without this client reconnecting.
- * That is acceptable - a wake buys one sweep, and everything after it obeys the
- * usual floor - but it is why CONNECTION_RESUMED is the one to trust.
+ * The rate is worth reading too: eleven resumes in a quarter of an hour is the
+ * gateway coming back after each app switch, which is exactly when a catch-up
+ * sweep should run.
  */
 export const CONNECT_EVENTS = [
     "CONNECTION_OPEN",
+    "POST_CONNECTION_OPEN",
     "CONNECTION_OPEN_SUPPLEMENTAL",
     "CONNECTION_RESUMED",
     "SESSIONS_REPLACE",
@@ -64,14 +74,27 @@ export const CONNECT_EVENTS = [
 ] as const;
 
 /**
- * Called from the CONNECTION_OPEN handler. Every connect issues a fresh id, so a
- * connect that carries none must clear the previous one rather than leave it
+ * The ones in that list that are not a connection opening.
+ *
+ * SESSIONS_REPLACE is the user's session list being replaced, which happens when
+ * any other device connects or changes presence - sixteen times in the capture
+ * above, more often than anything else. It is still worth sweeping on, since a
+ * wake is a wake, but it does not issue a new session id, and treating it as a
+ * connect meant it cleared a perfectly good one every time it fired.
+ */
+const NOT_A_CONNECTION = new Set(["SESSIONS_REPLACE", "SESSION_REPLACE"]);
+
+/**
+ * Called from every connect handler. A connection opening issues a fresh id, so
+ * one that carries none must clear the previous one rather than leave it
  * standing - the old id is dead either way.
  */
 export function rememberSessionId(eventName: string, event: any): void {
     connectionOpens++;
     lastConnectionOpenAt = Date.now();
     seenEvents.set(eventName, (seenEvents.get(eventName) ?? 0) + 1);
+
+    if (NOT_A_CONNECTION.has(eventName)) return;
 
     // READY nests the payload; the others carry it flat, under either spelling.
     const id = event?.sessionId
@@ -80,9 +103,6 @@ export function rememberSessionId(eventName: string, event: any): void {
         ?? event?.ready?.session_id
         ?? event?.d?.session_id;
 
-    // A connect that carries no id clears the previous one rather than leaving it
-    // standing: a new connection invalidates the old id either way, and the live
-    // lookup below is a better answer than a dead value.
     fromConnectionOpen = id ? String(id) : null;
 }
 
@@ -99,11 +119,11 @@ let sessionChanges = 0;
 /**
  * Reconnects noticed by the session id changing rather than by a dispatch.
  *
- * None of the seven candidate connect events fire on current Discord iOS - a
- * device reported "none since load" with all of them subscribed. But the id
- * itself was observed changing between two status calls minutes apart, and a new
- * id means a new connection. Polling for that change detects a reconnect without
- * depending on the name of an event nobody has identified yet.
+ * This was written when no candidate connect event had ever been seen to fire,
+ * and the id changing between two status calls was the only evidence a reconnect
+ * had happened at all. Five of them are now known to fire, so this is no longer
+ * the only signal - but it stays, because it depends on no event name being
+ * right, and every previous list of names here has been wrong.
  */
 export function noteSessionChange(): void {
     sessionChanges++;
@@ -120,11 +140,11 @@ export function observedConnectEvents(): string[] {
         .map(([name, count]) => `${name}×${count}`);
 }
 
-export function getSessionId(): string | null {
-    if (fromConnectionOpen) return fromConnectionOpen;
-
-    // Resolved fresh every time. The client's own value tracks the live connection;
-    // holding on to a copy is precisely how it goes stale.
+/**
+ * The client's own value, resolved fresh every time. It tracks the live
+ * connection; holding on to a copy is precisely how it goes stale.
+ */
+function lookupSessionId(): string | null {
     const candidates: Array<() => any> = [
         () => findByProps("getSessionId")?.getSessionId?.(),
         () => (findByStoreName("SessionStore") as any)?.getSessionId?.(),
@@ -139,6 +159,20 @@ export function getSessionId(): string | null {
     }
 
     return null;
+}
+
+/**
+ * The live lookup first, and only then the id a connect dispatch carried.
+ *
+ * That order is not a preference, it is what keeps two things working. The
+ * remembered id is a snapshot that the next reconnect invalidates, where the
+ * lookup is never stale - and it is also what the reconnect backstop watches for
+ * a change, so a remembered value shadowing it would freeze the one signal that
+ * needs no event name to be right. It survives here as the fallback for a build
+ * where no lookup answers, which is the only case it was ever needed for.
+ */
+export function getSessionId(): string | null {
+    return lookupSessionId() ?? fromConnectionOpen;
 }
 
 /**
@@ -158,12 +192,14 @@ export function sessionStatus(): {
 } {
     const base = { connectionOpens, lastConnectionOpenAt };
 
-    if (fromConnectionOpen) {
-        return { held: true, source: "CONNECTION_OPEN", hint: redact(fromConnectionOpen), ...base };
-    }
+    // Reported in the order getSessionId resolves them, so the status line names
+    // the id a press would actually go out under.
+    const live = lookupSessionId();
+    if (live) return { held: true, source: "module lookup", hint: redact(live), ...base };
 
-    const id = getSessionId();
-    if (id) return { held: true, source: "module lookup", hint: redact(id), ...base };
+    if (fromConnectionOpen) {
+        return { held: true, source: "a connect dispatch", hint: redact(fromConnectionOpen), ...base };
+    }
 
     return { held: false, source: "none", hint: "—", ...base };
 }
