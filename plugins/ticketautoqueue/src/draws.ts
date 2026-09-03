@@ -16,6 +16,9 @@ const LEAVE_PREFIX = "leave_claim_queue";
 const MENTION_RE = /<@!?(\d+)>/g;
 const DEADLINE_RE = /<t:(\d+):[A-Za-z]>/;
 // Observed live: "👍 Selected staff: <@id>" under a "Claim Queue Winner" heading.
+// Kept as the default, but the caller may supply its own: the entire win path
+// hangs off this one phrase, so a bot rewording its announcement would otherwise
+// make every win undetectable until the plugin itself was changed.
 const WINNER_RE = /selected staff:?\s*<@!?(\d+)>/i;
 const GRACE_MS = 60000;
 
@@ -109,10 +112,12 @@ export function mentionIds(message: any): Set<string> {
  * who joined - so "mentions me" is true for every loser, and using it declared a win
  * for all of them.
  */
-export function winnerId(texts: string[]): string | null {
+export function winnerId(texts: string[], pattern: RegExp = WINNER_RE): string | null {
     for (const text of texts) {
-        const m = WINNER_RE.exec(text);
-        if (m) return m[1];
+        const m = pattern.exec(text);
+        // A pattern with no capture group matches the announcement but names
+        // nobody, which would read as a win for whoever saw it first.
+        if (m && m[1]) return m[1];
     }
     return null;
 }
@@ -180,7 +185,13 @@ export function markAlerted(channelId: string): void {
     if (draw) draw.alerted = true;
 }
 
-export function observeDraw(message: any, selfId: string, ticketBotId: string, now = Date.now()): DrawOutcome {
+export function observeDraw(
+    message: any,
+    selfId: string,
+    ticketBotId: string,
+    now = Date.now(),
+    winnerPattern?: RegExp
+): DrawOutcome {
     const channelId = String(message?.channel_id ?? "");
     const draw = pending.get(channelId);
     if (!draw) return { kind: "ignore" };
@@ -208,7 +219,7 @@ export function observeDraw(message: any, selfId: string, ticketBotId: string, n
     // Rule 2: the bot names the winner explicitly, in its own message. Anything else -
     // including the closed roster that still lists us - is not a result.
     const texts = [String(message?.content ?? ""), ...collectTexts(message?.components)];
-    const winner = winnerId(texts);
+    const winner = winnerId(texts, winnerPattern ?? WINNER_RE);
     if (winner === null) return { kind: "unknown", draw };
 
     pending.delete(channelId);

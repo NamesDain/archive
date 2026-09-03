@@ -1553,3 +1553,173 @@ describe("the connect events this build really fires", () => {
         c.plugin.onUnload();
     });
 });
+
+describe("stats that survive a restart", () => {
+    function runCommand(c, action) {
+        c.registeredCommands[0].execute(
+            [{ name: "action", value: action }],
+            { channel: { id: TICKET_CHANNEL_ID } }
+        );
+        return c.calls.botMessages.at(-1).content;
+    }
+
+    async function pressOnce(c, id) {
+        dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
+            message: makeTicketPanel({ id, channelId: TICKET_CHANNEL_ID, botId: BOT_ID })
+        });
+        await settle();
+    }
+
+    // Discord restarts often on mobile, so a session-only counter can never
+    // describe a shift - which is the number anyone actually wants.
+    it("carries today and all-time across a reload", async () => {
+        const c = loadConfigured();
+        await pressOnce(c, "1600");
+
+        assert.match(runCommand(c, "stats"), /\*\*Today:\*\* 1 press/);
+
+        c.plugin.onUnload();
+        c.plugin.onLoad();
+
+        const after = runCommand(c, "stats");
+        assert.match(after, /\*\*Presses sent:\*\* 0/, "the session starts again");
+        assert.match(after, /\*\*Today:\*\* 1 press/, "but today does not");
+        assert.match(after, /\*\*All time:\*\* 1 press/);
+        c.plugin.onUnload();
+    });
+
+    it("starts today again on a new day, keeping all-time", async () => {
+        const c = loadConfigured();
+        await pressOnce(c, "1601");
+
+        // Re-date the stored record to yesterday, as the clock rolling over would.
+        const stored = JSON.parse(c.storage.statsJson);
+        stored.day = "2000-01-01";
+        c.storage.statsJson = JSON.stringify(stored);
+
+        const report = runCommand(c, "stats");
+        assert.match(report, /\*\*Today:\*\* 0 presses/, "a new day starts from zero");
+        assert.match(report, /\*\*All time:\*\* 1 press/, "all time keeps it");
+        c.plugin.onUnload();
+    });
+
+    it("survives a corrupted stats blob rather than throwing", async () => {
+        const c = loadConfigured();
+        c.storage.statsJson = "{not json";
+
+        await pressOnce(c, "1602");
+
+        assert.match(runCommand(c, "stats"), /\*\*Today:\*\* 1 press/, "unreadable stats start over, they do not break a press");
+        c.plugin.onUnload();
+    });
+});
+
+describe("reading back what it decided", () => {
+    function runCommand(c, action) {
+        c.registeredCommands[0].execute(
+            [{ name: "action", value: action }],
+            { channel: { id: TICKET_CHANNEL_ID } }
+        );
+        return c.calls.botMessages.at(-1).content;
+    }
+
+    // Verbose logging already explains every decision, but a phone console is not
+    // somewhere anyone can read one. This is the same information, in Discord.
+    it("lists presses and the gate reasons that stopped one", async () => {
+        const c = loadConfigured({ maxConcurrentQueues: 1 });
+
+        dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
+            message: makeTicketPanel({ id: "1700", channelId: TICKET_CHANNEL_ID, botId: BOT_ID })
+        });
+        await settle();
+
+        const other = "888888888888888888";
+        c.stores.ChannelStore._channels.set(other, makeChannel({
+            id: other, name: "ticket-0004", parentId: CATEGORY_ID, guildId: GUILD_ID
+        }));
+        dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
+            message: makeTicketPanel({ id: "1701", channelId: other, botId: BOT_ID })
+        });
+        await settle();
+
+        const report = runCommand(c, "recent");
+        assert.match(report, /ticket-0001: \*\*joined\*\*/);
+        assert.match(report, /ticket-0004: \*\*did not press\*\* — already in 1 open queue/);
+        c.plugin.onUnload();
+    });
+
+    it("records a win against the channel it happened in", async () => {
+        const c = loadConfigured();
+        dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
+            message: makeTicketPanel({ id: "1710", channelId: TICKET_CHANNEL_ID, botId: BOT_ID })
+        });
+        await settle();
+
+        dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
+            message: {
+                id: "1711",
+                channel_id: TICKET_CHANNEL_ID,
+                author: { id: BOT_ID },
+                content: "",
+                components: [{ type: 17, components: [{ type: 10, content: `Selected staff: <@${SELF_ID}>` }] }]
+            }
+        });
+
+        assert.match(runCommand(c, "recent"), /ticket-0001: \*\*WON\*\*/);
+        c.plugin.onUnload();
+    });
+
+    it("says so plainly when nothing has been decided", () => {
+        const c = loadConfigured();
+        assert.match(runCommand(c, "recent"), /Nothing decided yet/);
+        c.plugin.onUnload();
+    });
+});
+
+describe("a bot that renames its winner announcement", () => {
+    // The whole win path hangs off one phrase. A bot rewording it used to make
+    // every win undetectable until the plugin itself changed.
+    async function joinThen(c, announcement) {
+        dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
+            message: makeTicketPanel({ id: "1800", channelId: TICKET_CHANNEL_ID, botId: BOT_ID })
+        });
+        await settle();
+
+        dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
+            message: {
+                id: "1801",
+                channel_id: TICKET_CHANNEL_ID,
+                author: { id: BOT_ID },
+                content: "",
+                components: [{ type: 17, components: [{ type: 10, content: announcement }] }]
+            }
+        });
+    }
+
+    it("detects a win using a pattern from settings", async () => {
+        const c = loadConfigured({ winnerPattern: "assigned to <@!?(\\d+)>" });
+        await joinThen(c, `This ticket is now assigned to <@${SELF_ID}>`);
+
+        assert.equal(c.calls.alerts.length, 1, "the configured wording must be recognised");
+        c.plugin.onUnload();
+    });
+
+    it("does not call it a win for someone else", async () => {
+        const c = loadConfigured({ winnerPattern: "assigned to <@!?(\\d+)>" });
+        await joinThen(c, "This ticket is now assigned to <@888888888888888888>");
+
+        assert.equal(c.calls.alerts.length, 0);
+        c.plugin.onUnload();
+    });
+
+    it("falls back to the built-in pattern rather than losing win detection", async () => {
+        const c = loadConfigured({ winnerPattern: "([unclosed" });
+        await joinThen(c, `Selected staff: <@${SELF_ID}>`);
+
+        assert.equal(
+            c.calls.alerts.length, 1,
+            "an uncompilable pattern must not silently disable wins"
+        );
+        c.plugin.onUnload();
+    });
+});

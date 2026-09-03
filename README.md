@@ -47,7 +47,8 @@ ticket channel to dry-run the matcher against the panel there without pressing a
 | Command | Does |
 | --- | --- |
 | `/taq status` | Config, gate state, pending draws, last sweep, whether press confirmation works on this build. The default with no argument. |
-| `/taq stats` | Presses, wins, losses and win rate for this session. |
+| `/taq stats` | Presses, wins, losses and win rate — for this session, today, and all time. |
+| `/taq recent` | The last 20 decisions with reasons: what it joined, what it skipped and why. |
 | `/taq test` | Dry-runs the matcher against the most recent panel in the current channel. Reports every button it found, its real field names, and why it would or would not press. |
 | `/taq sweep` | Joins queues on tickets that are already open, one at a time. |
 | `/taq pause for:30m` | Stops joining for a while. Accepts `90s`, `45m`, `2h`, or a bare number of minutes; defaults to 30 minutes. Survives a restart. |
@@ -59,6 +60,26 @@ They all reply with a bot message only you can see.
 **Pause rather than disarming** when you step away: a pause states when it ends and
 comes back on its own, where Armed stays off until you remember it. Claiming a ticket
 you cannot service is the failure this plugin exists to avoid.
+
+### If the bot rewords its announcement
+
+**Winner announcement pattern** is the regex that decides a win, with the winner's user ID
+in its first capture group. It is a setting because the entire win path hangs off that one
+phrase — if the ticket bot changes its wording, this is a settings edit rather than a
+plugin change. A pattern that will not compile falls back to the built-in one; silently
+disabling win detection would lose tickets with nothing to show for it.
+
+### Reading what it did
+
+`/taq recent` lists the last 20 decisions in Discord — joins, and skips with the gate
+reason that caused them. Verbose logging says the same thing, but a phone console is not
+somewhere anyone can practically read one. Panels that were never matched are left out;
+every message in a watched category runs through the matcher and listing those would bury
+the handful that matter.
+
+`/taq stats` covers three horizons. Session answers "is it working right now"; today and
+all time are persisted, because Discord restarts often enough on mobile that a session
+rarely covers a whole shift.
 
 ### Not taking on too much at once
 
