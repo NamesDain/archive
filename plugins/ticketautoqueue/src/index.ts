@@ -42,9 +42,12 @@ const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
 const OPTION_TYPE_STRING = 3;
 
-// Long enough to cover an app switch and a reconnect, short enough that nobody
-// leaves it running by accident.
-const PROBE_DURATION_MS = 120000;
+// The interaction question can only be answered by a capture that overlaps a real
+// ticket, and two minutes almost never does - both runs so far caught only voice
+// telemetry. Half an hour is long enough to span one, and the cost while running
+// is a regex against each dispatch type, so a window nobody remembers to stop is
+// not a problem worth optimising against.
+const PROBE_DURATION_MS = 1800000;
 
 let startSweepTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectSweepTimer: ReturnType<typeof setTimeout> | null = null;
@@ -589,13 +592,13 @@ export default {
                     // means "connected" here and whether interaction outcomes fire.
                     if (isCapturing()) return sendBotMessage(channelId, probeReport());
 
-                    const seconds = Math.round(PROBE_DURATION_MS / 1000);
+                    const minutes = Math.round(PROBE_DURATION_MS / 60000);
                     if (!startProbe(PROBE_DURATION_MS)) {
                         return sendBotMessage(channelId, "This build gives no way to observe dispatches, so there is nothing to capture.");
                     }
                     return sendBotMessage(
                         channelId,
-                        `Watching dispatches for ${seconds}s. Switch away from Discord and back, or let the connection drop, then run \`/taq events\` again for the list.`
+                        `Watching dispatches for ${minutes} min. Leave it running until a ticket comes in — a press is the only thing that can show whether interaction outcomes are reported here. Run \`/taq events\` again any time for the list.`
                     );
                 }
 

@@ -19,6 +19,19 @@ globalThis.setInterval = (...args) => {
     return handle;
 };
 
+// Long timeouts get the same treatment, for the same reason. The dispatch probe
+// arms a half-hour auto-stop, and a test that fails before its cleanup leaves it
+// running - which held the process open for thirty minutes instead of printing
+// the failure. Only long ones: a test may legitimately await a short timer, and
+// unreferencing those would let node exit mid-test.
+const LONG_TIMER_MS = 60000;
+const realSetTimeout = globalThis.setTimeout;
+globalThis.setTimeout = (fn, delay, ...rest) => {
+    const handle = realSetTimeout(fn, delay, ...rest);
+    if (typeof delay === "number" && delay >= LONG_TIMER_MS) handle?.unref?.();
+    return handle;
+};
+
 /**
  * @param {object} [options]
  * @param {boolean} [options.modernComponents] false makes findByProps miss the

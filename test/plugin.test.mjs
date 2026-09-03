@@ -1370,7 +1370,7 @@ describe("naming the dispatches this build fires", () => {
     it("captures the dispatches that fire while watching", () => {
         const c = loadConfigured();
 
-        assert.match(runCommand(c, "events"), /Watching dispatches/);
+        assert.match(runCommand(c, "events"), /Watching dispatches for 30 min/);
 
         c.dispatchRaw({ type: "GATEWAY_SOCKET_OPEN" });
         c.dispatchRaw({ type: "GATEWAY_SOCKET_OPEN" });
@@ -1390,7 +1390,7 @@ describe("naming the dispatches this build fires", () => {
         c.dispatchRaw({ type: "TYPING_START" });
         c.dispatchRaw({ type: "CHANNEL_SELECT" });
 
-        assert.match(runCommand(c, "events"), /nothing matching yet/);
+        assert.match(runCommand(c, "events"), /Nothing matching/);
         c.plugin.onUnload();
     });
 
@@ -1414,7 +1414,7 @@ describe("naming the dispatches this build fires", () => {
         // Starting now clears anything from before, so the report covers only the
         // window the user actually asked about.
         runCommand(c, "events");
-        assert.match(runCommand(c, "events"), /nothing matching yet/);
+        assert.match(runCommand(c, "events"), /Nothing matching/);
         c.plugin.onUnload();
     });
 
@@ -1720,6 +1720,53 @@ describe("a bot that renames its winner announcement", () => {
             c.calls.alerts.length, 1,
             "an uncompilable pattern must not silently disable wins"
         );
+        c.plugin.onUnload();
+    });
+});
+
+describe("keeping the probe useful", () => {
+    function runCommand(c, action) {
+        c.registeredCommands[0].execute(
+            [{ name: "action", value: action }],
+            { channel: { id: TICKET_CHANNEL_ID } }
+        );
+        return c.calls.botMessages.at(-1).content;
+    }
+
+    // Two capture runs on a device returned little but this. It matches the filter
+    // on "CONNECTION" and fires about ten times a minute regardless of anything
+    // the plugin cares about.
+    it("leaves voice and media telemetry out of the report", () => {
+        const c = loadConfigured();
+        runCommand(c, "events");
+
+        for (let i = 0; i < 10; i++) c.dispatchRaw({ type: "MEDIA_ENGINE_CONNECTION_STATS" });
+        c.dispatchRaw({ type: "VOICE_STATE_UPDATES" });
+        c.dispatchRaw({ type: "RTC_CONNECTION_STATS" });
+
+        assert.match(runCommand(c, "events"), /Nothing matching/);
+        c.plugin.onUnload();
+    });
+
+    it("still reports a real connect event among the noise", () => {
+        const c = loadConfigured();
+        runCommand(c, "events");
+
+        for (let i = 0; i < 10; i++) c.dispatchRaw({ type: "MEDIA_ENGINE_CONNECTION_STATS" });
+        c.dispatchRaw({ type: "CONNECTION_RESUMED" });
+
+        const report = runCommand(c, "events");
+        assert.match(report, /CONNECTION_RESUMED` ×1/);
+        assert.doesNotMatch(report, /MEDIA_ENGINE/, "the noise must not come back with it");
+        c.plugin.onUnload();
+    });
+
+    it("says how long it is still watching, so it can be left running for a ticket", () => {
+        const c = loadConfigured();
+        runCommand(c, "events");
+        c.dispatchRaw({ type: "INTERACTION_SUCCESS" });
+
+        assert.match(runCommand(c, "events"), /Still watching for another \d+ min/);
         c.plugin.onUnload();
     });
 });
