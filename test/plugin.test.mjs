@@ -806,6 +806,58 @@ describe("a bot that drops presses", () => {
         c.plugin.onUnload();
     });
 
+    // The retry only became reachable on the device once outcomes were confirmed
+    // to be reported. "The bot never answered" and "the bot acted and was slow to
+    // say so" look identical from the interaction alone, and pressing again in the
+    // second case re-sends the same custom_id - which a bot treating it as a toggle
+    // would answer by taking you back out of the queue you just joined.
+    it("stops retrying once the button has gone from the panel", async () => {
+        const c = loadConfigured();
+        c.interactionOutcomes.push("rejected");
+
+        dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
+            message: makeTicketPanel({ id: "973", channelId: TICKET_CHANNEL_ID, botId: BOT_ID })
+        });
+
+        // The bot swaps Join Queue for Leave Queue once you are in, so the press
+        // plainly landed whatever the client said about the interaction.
+        c.stores.MessageStore._messages.set(TICKET_CHANNEL_ID, {
+            _array: [makeTicketPanel({
+                id: "973", channelId: TICKET_CHANNEL_ID, botId: BOT_ID,
+                label: "Leave Queue", customId: "leave_claim_queue:1"
+            })]
+        });
+
+        await afterRetries();
+
+        assert.equal(
+            c.calls.rest.filter(r => r.url === "/interactions").length, 1,
+            "the press landed, and pressing again could undo it"
+        );
+        assert.match(
+            c.calls.toasts.at(-1).content, /Pressed Join Queue/,
+            "and it is reported as sent, not as a ticket the bot refused"
+        );
+        c.plugin.onUnload();
+    });
+
+    it("keeps retrying while the button is still there", async () => {
+        const c = loadConfigured();
+        c.interactionOutcomes.push("rejected", "joined");
+
+        const panel = makeTicketPanel({ id: "974", channelId: TICKET_CHANNEL_ID, botId: BOT_ID });
+        c.stores.MessageStore._messages.set(TICKET_CHANNEL_ID, { _array: [panel] });
+        dispatch(c.fluxHandlers, "MESSAGE_CREATE", { message: panel });
+
+        await afterRetries();
+
+        assert.equal(
+            c.calls.rest.filter(r => r.url === "/interactions").length, 2,
+            "an unchanged panel is a press that did not land, and the retry is the point"
+        );
+        c.plugin.onUnload();
+    });
+
     it("stops trying a ticket the bot keeps refusing", async () => {
         const c = loadConfigured();
         // Two full rounds of three rejected attempts, then the gate should refuse.

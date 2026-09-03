@@ -67,6 +67,22 @@ export function cachedMessages(channelId: string): any[] {
 }
 
 /**
+ * One cached message, when the client still holds it.
+ *
+ * getMessage is the documented accessor; the cached list is the fallback, being
+ * the path already proven to work on this build. Null means "not cached", which
+ * a caller must not read as "gone".
+ */
+export function cachedMessage(channelId: string, messageId: string): any {
+    try {
+        const direct = MessageStore()?.getMessage?.(channelId, messageId);
+        if (direct) return direct;
+    } catch { /* fall through to the cached list */ }
+
+    return cachedMessages(channelId).find(m => String(m?.id) === String(messageId)) ?? null;
+}
+
+/**
  * Every channel in a guild, as objects carrying at least `id` and `parent_id`.
  *
  * Desktop has GuildChannelStore.getSelectableChannels; mobile has no such store,
