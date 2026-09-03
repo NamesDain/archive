@@ -23,7 +23,10 @@ import {
 } from "./interactions";
 import { clearHistory, describe as describeEntry, record, recent } from "./history";
 import { collectButtons, customIdOf, matchTicket } from "./matcher";
-import { isCapturing, probeReport, resetProbe, startProbe } from "./probe";
+import {
+    extendProbe, isCapturing, PROBE_DEFAULT_MS, PROBE_MAX_MS, probeRemainingMs, probeReport,
+    resumeProbe, startProbe, stopProbe, suspendProbe
+} from "./probe";
 import {
     CONNECT_EVENTS, forgetSessionId, getSessionId, noteSessionChange, observedConnectEvents,
     rememberSessionId, sessionChangeCount, sessionStatus
@@ -42,12 +45,9 @@ const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
 const OPTION_TYPE_STRING = 3;
 
-// The interaction question can only be answered by a capture that overlaps a real
-// ticket, and two minutes almost never does - both runs so far caught only voice
-// telemetry. Half an hour is long enough to span one, and the cost while running
-// is a regex against each dispatch type, so a window nobody remembers to stop is
-// not a problem worth optimising against.
-const PROBE_DURATION_MS = 1800000;
+// Ends a capture early. A window long enough to be worth starting is too long to
+// sit through once the question it was answering has been answered.
+const STOP_WORDS = /^(0|off|stop|end|no)$/i;
 
 let startSweepTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectSweepTimer: ReturnType<typeof setTimeout> | null = null;
@@ -466,6 +466,13 @@ function statusReport(): string {
     if (gates.pausedForMs > 0) {
         lines.push(`**Paused:** yes — ${describeDuration(gates.pausedForMs)} left (\`/taq resume\` to lift)`);
     }
+
+    // A capture runs for hours and across restarts, so the one place that says
+    // what the plugin is currently doing has to mention it.
+    const watching = probeRemainingMs();
+    if (watching > 0) {
+        lines.push(`**Event capture:** running — ${describeDuration(watching)} left (\`/taq events\` for the list)`);
+    }
     if (settings.maxConcurrentQueues > 0) {
         lines.push(`**Open queues:** ${gates.openQueues} of ${settings.maxConcurrentQueues} allowed at once`);
     }
@@ -546,7 +553,7 @@ export default {
         initSettings();
         resetStats();
         clearHistory();
-        resetProbe();
+        resumeProbe();
         resetInteractionWatch();
         startInteractionWatch();
         startActivityTracking(onReturnedToForeground);
@@ -578,7 +585,7 @@ export default {
                 },
                 {
                     name: "for",
-                    description: "how long to pause, e.g. 30m, 2h, 90s (default 30m)",
+                    description: "how long, e.g. 30m, 2h, 90s (default 30m; `off` stops a capture)",
                     type: OPTION_TYPE_STRING,
                     required: false
                 }
@@ -590,15 +597,50 @@ export default {
                 if (action === "events") {
                     // Answers, from observation rather than guesswork, which dispatch
                     // means "connected" here and whether interaction outcomes fire.
-                    if (isCapturing()) return sendBotMessage(channelId, probeReport());
+                    // The second question needs a capture that overlaps a real press,
+                    // and a ticket opens when a client decides to open one - so the
+                    // window is set by whoever is waiting for it, not by this file.
+                    const requested = optionValue(args, "for", "").trim();
 
-                    const minutes = Math.round(PROBE_DURATION_MS / 60000);
-                    if (!startProbe(PROBE_DURATION_MS)) {
+                    if (STOP_WORDS.test(requested)) {
+                        if (!isCapturing()) return sendBotMessage(channelId, "Nothing is being captured right now.");
+                        stopProbe();
+                        return sendBotMessage(channelId, `Stopped watching.\n\n${probeReport()}`);
+                    }
+
+                    let window = PROBE_DEFAULT_MS;
+                    let capped = "";
+                    if (requested) {
+                        const asked = parseDuration(requested);
+                        if (asked === null) {
+                            return sendBotMessage(channelId, `Could not read a duration from \`${requested}\`. Try \`6h\`, \`45m\`, \`90s\`, or \`off\` to stop.`);
+                        }
+                        window = Math.min(asked, PROBE_MAX_MS);
+                        if (asked > PROBE_MAX_MS) capped = ` (asked for ${describeDuration(asked)}, capped)`;
+                    }
+
+                    if (isCapturing()) {
+                        // Plain is how the list is read. With a duration, it is how a
+                        // capture that has not caught a ticket yet gets kept alive -
+                        // without discarding what it has already counted.
+                        if (!requested) return sendBotMessage(channelId, probeReport());
+                        extendProbe(window);
+                        return sendBotMessage(
+                            channelId,
+                            `Now watching for another **${describeDuration(window)}**${capped}, keeping what it has seen so far.\n\n${probeReport()}`
+                        );
+                    }
+
+                    if (!startProbe(window)) {
                         return sendBotMessage(channelId, "This build gives no way to observe dispatches, so there is nothing to capture.");
                     }
                     return sendBotMessage(
                         channelId,
-                        `Watching dispatches for ${minutes} min. Leave it running until a ticket comes in — a press is the only thing that can show whether interaction outcomes are reported here. Run \`/taq events\` again any time for the list.`
+                        [
+                            `Watching dispatches for **${describeDuration(window)}**${capped}, and it carries on across a Discord restart.`,
+                            `Leave it running until a ticket comes in — a press is the only thing that can show whether interaction outcomes are reported here.`,
+                            `\`/taq events\` shows the list, \`/taq events for:6h\` sets or extends the window (up to ${describeDuration(PROBE_MAX_MS)}), \`/taq events for:off\` stops it.`
+                        ].join(" ")
                     );
                 }
 
@@ -682,7 +724,7 @@ export default {
 
         lastSeenSessionId = null;
         clearHistory();
-        resetProbe();
+        suspendProbe();
         stopInteractionWatch();
         stopActivityTracking();
         resetGates();

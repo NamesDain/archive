@@ -28,6 +28,7 @@ export interface TaqSettings {
     cooldownMs: number;
     maxConcurrentQueues: number;
     pausedUntil: number;
+    probeUntil: number;
     statsJson: string;
     winnerPattern: string;
     catchUpOnStart: boolean;
@@ -64,6 +65,11 @@ export const DEFAULTS: Readonly<TaqSettings> = {
     // Epoch ms. Survives a reload deliberately: a pause you set because you
     // stepped away should not be undone by the app restarting.
     pausedUntil: 0,
+    // Epoch ms, and 0 when nothing is being captured. Also survives a reload: a
+    // dispatch capture long enough to span a ticket is long enough to be
+    // interrupted by a restart, and one that quietly ended at the restart would
+    // still read as running - see probe.ts.
+    probeUntil: 0,
     // Today's and lifetime counters, as one JSON string - see stats.ts for why
     // it is not a nested object.
     statsJson: "",

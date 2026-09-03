@@ -53,13 +53,23 @@ ticket channel to dry-run the matcher against the panel there without pressing a
 | `/taq sweep` | Joins queues on tickets that are already open, one at a time. |
 | `/taq pause for:30m` | Stops joining for a while. Accepts `90s`, `45m`, `2h`, or a bare number of minutes; defaults to 30 minutes. Survives a restart. |
 | `/taq resume` | Lifts a pause early. |
-| `/taq events` | Watches the client's dispatcher for two minutes and names the connect, session and interaction dispatches it fires. Opt-in, self-stopping, and only for identifying events this build names differently. |
+| `/taq events for:6h` | Watches the client's dispatcher and names the connect, session and interaction dispatches it fires. Defaults to 30 minutes, takes anything up to `12h`, and survives Discord restarting. Run it again plain for the list, again with a duration to extend, and `for:off` to stop. |
 
 They all reply with a bot message only you can see.
 
 **Pause rather than disarming** when you step away: a pause states when it ends and
 comes back on its own, where Armed stays off until you remember it. Claiming a ticket
 you cannot service is the failure this plugin exists to avoid.
+
+### Watching for events over a long window
+
+The question a capture exists to settle — whether this build reports interaction outcomes at
+all — can only be answered by a capture that overlaps a real press, and a ticket opens whenever
+a client decides to open one. So the window is yours to set rather than a fixed one: `/taq events
+for:6h` starts one, `/taq events` shows what it has caught so far, running it again with a
+duration extends it *without* discarding the counts, and `for:off` ends it early. The deadline
+is stored, so Discord restarting mid-window picks the capture back up — the counts restart with
+the app, and the report says so. `/taq status` shows how much of the window is left.
 
 ### If the bot rewords its announcement
 
