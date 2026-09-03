@@ -1370,7 +1370,7 @@ describe("naming the dispatches this build fires", () => {
     it("captures the dispatches that fire while watching", () => {
         const c = loadConfigured();
 
-        assert.match(runCommand(c, "events"), /Watching dispatches for 30 min/);
+        assert.match(runCommand(c, "events"), /Watching dispatches for \*\*30 min\*\*/);
 
         c.dispatchRaw({ type: "GATEWAY_SOCKET_OPEN" });
         c.dispatchRaw({ type: "GATEWAY_SOCKET_OPEN" });
@@ -1768,5 +1768,138 @@ describe("keeping the probe useful", () => {
 
         assert.match(runCommand(c, "events"), /Still watching for another \d+ min/);
         c.plugin.onUnload();
+    });
+});
+
+// A ticket opens when a client decides to open one. No fixed window is right for
+// that, so the length is the caller's to choose, extend, and end.
+describe("choosing how long to watch for events", () => {
+    function runCommand(c, action, forValue) {
+        const args = [{ name: "action", value: action }];
+        if (forValue !== undefined) args.push({ name: "for", value: forValue });
+
+        c.registeredCommands[0].execute(args, { channel: { id: TICKET_CHANNEL_ID } });
+        return c.calls.botMessages.at(-1).content;
+    }
+
+    it("watches for the length asked for", () => {
+        const c = loadConfigured();
+
+        assert.match(runCommand(c, "events", "4h"), /Watching dispatches for \*\*4 h\*\*/);
+
+        c.dispatchRaw({ type: "CONNECTION_RESUMED" });
+        assert.match(
+            runCommand(c, "events"), /Still watching for another 4 h/,
+            "the window has to be the one that was asked for, not the default"
+        );
+        c.plugin.onUnload();
+    });
+
+    it("caps a window that would outlive any reason for starting it", () => {
+        const c = loadConfigured();
+
+        const reply = runCommand(c, "events", "48h");
+        assert.match(reply, /Watching dispatches for \*\*12 h\*\*/);
+        assert.match(reply, /asked for 48 h, capped/);
+        c.plugin.onUnload();
+    });
+
+    it("refuses a duration it cannot read rather than starting one nobody chose", () => {
+        const c = loadConfigured();
+
+        assert.match(runCommand(c, "events", "whenever"), /Could not read a duration/);
+        assert.equal(c.storage.probeUntil, 0, "nothing should be watching after a bad duration");
+
+        assert.match(
+            runCommand(c, "events"), /Watching dispatches for/,
+            "a plain run afterwards has to start a capture, proving none was left running"
+        );
+        c.plugin.onUnload();
+    });
+
+    it("extends a running capture without discarding what it has seen", () => {
+        const c = loadConfigured();
+        runCommand(c, "events");
+        c.dispatchRaw({ type: "INTERACTION_SUCCESS" });
+
+        const reply = runCommand(c, "events", "6h");
+        assert.match(reply, /Now watching for another \*\*6 h\*\*/);
+        assert.match(
+            reply, /INTERACTION_SUCCESS` ×1/,
+            "extending must keep the count - restarting would throw away the hours already watched"
+        );
+        c.plugin.onUnload();
+    });
+
+    it("stops early when told to, and reports what it caught", () => {
+        const c = loadConfigured();
+        runCommand(c, "events", "6h");
+        c.dispatchRaw({ type: "INTERACTION_SUCCESS" });
+
+        const stopped = runCommand(c, "events", "off");
+        assert.match(stopped, /Stopped watching/);
+        assert.match(stopped, /INTERACTION_SUCCESS` ×1/);
+        assert.equal(c.storage.probeUntil, 0, "a stopped capture must not be resumed on the next load");
+
+        assert.doesNotMatch(runCommand(c, "status"), /Event capture/);
+        assert.match(runCommand(c, "events", "off"), /Nothing is being captured/);
+        c.plugin.onUnload();
+    });
+
+    it("says in the status report that a capture is running", () => {
+        const c = loadConfigured();
+        runCommand(c, "events", "3h");
+
+        assert.match(runCommand(c, "status"), /\*\*Event capture:\*\* running — 3 h left/);
+        c.plugin.onUnload();
+    });
+
+    // Discord restarts often on a phone, and a window measured in hours will
+    // usually meet one. A capture that ended there would still read as running.
+    it("carries a capture across a restart", () => {
+        const mock = createMockVendetta();
+        const first = evalPlugin(BUNDLE, mock.vendetta);
+        first.onLoad();
+        mock.registeredCommands[0].execute(
+            [{ name: "action", value: "events" }, { name: "for", value: "6h" }],
+            { channel: { id: TICKET_CHANNEL_ID } }
+        );
+        first.onUnload();
+
+        assert.ok(mock.storage.probeUntil > Date.now(), "the deadline has to outlive the unload");
+
+        const second = evalPlugin(BUNDLE, mock.vendetta);
+        second.onLoad();
+        mock.dispatchRaw({ type: "CONNECTION_RESUMED" });
+
+        mock.registeredCommands[0].execute(
+            [{ name: "action", value: "events" }],
+            { channel: { id: TICKET_CHANNEL_ID } }
+        );
+        const report = mock.calls.botMessages.at(-1).content;
+
+        assert.match(report, /CONNECTION_RESUMED` ×1/, "the resumed capture has to be counting");
+        assert.match(
+            report, /since Discord last restarted/,
+            "the counts are younger than the window, and the report has to say so"
+        );
+        second.onUnload();
+    });
+
+    it("does not resume a window that already ran out", () => {
+        const mock = createMockVendetta();
+        mock.storage.probeUntil = Date.now() - 1000;
+
+        const plugin = evalPlugin(BUNDLE, mock.vendetta);
+        plugin.onLoad();
+
+        assert.equal(mock.storage.probeUntil, 0, "an expired deadline must be cleared, not resumed");
+
+        mock.registeredCommands[0].execute(
+            [{ name: "action", value: "status" }],
+            { channel: { id: TICKET_CHANNEL_ID } }
+        );
+        assert.doesNotMatch(mock.calls.botMessages.at(-1).content, /Event capture/);
+        plugin.onUnload();
     });
 });
