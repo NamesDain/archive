@@ -127,6 +127,12 @@ being exactly one press in flight. A press is only reported as *rejected* — th
 drives a retry — on a build that names the press in its outcome; otherwise a timeout is reported
 as "sent" and nothing is retried on the strength of it.
 
+A retry also stops early if the **Join Queue** button has gone from the panel. "The bot never
+answered" and "the bot answered slower than the client's three-second limit" are the same event
+from inside the client, and pressing again in the second case re-sends the same `custom_id` — which
+a bot that treats it as a toggle would answer by taking you back out of the queue you just joined.
+The panel is the evidence that separates them.
+
 **Notifications.** There is no desktop-notification API from inside the mobile client. The two
 alerts that matter — you won the draw, and a draw is closing while you are away — are modals
 that stay up until dismissed, with the jump-to-ticket action on the confirm button, plus a

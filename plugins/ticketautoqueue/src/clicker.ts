@@ -14,8 +14,8 @@
 
 import { logger } from "@vendetta";
 
-import { RestAPI } from "./discord";
-import { TicketTarget } from "./matcher";
+import { cachedMessage, RestAPI } from "./discord";
+import { collectButtons, customIdOf, TicketTarget } from "./matcher";
 import { withRateLimitRetry } from "./net";
 import { awaitOutcome, Outcome } from "./interactions";
 import { getSessionId } from "./session";
@@ -26,7 +26,8 @@ const COMPONENT_TYPE_BUTTON = 2;
 
 /**
  * - joined:     the client confirmed the bot acted on the press.
- * - sent:       accepted for delivery; this build reports no outcome, so nothing more is known.
+ * - sent:       accepted for delivery, nothing further known - either this build
+ *               reports no outcome, or the panel changed before a retry.
  * - rejected:   the bot ignored or refused every attempt.
  * - failed:     the request itself did not get through.
  * - no-session: no gateway session, so no press is possible.
@@ -75,6 +76,30 @@ const RETRY_DELAY_MS = 1200;
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
 /**
+ * Whether the button we pressed is still on the panel.
+ *
+ * A retry exists for a press the bot dropped, but "the bot never answered" and
+ * "the bot acted and took longer than the client's three seconds to say so" are
+ * indistinguishable from here - both surface as an interaction failure. The panel
+ * tells them apart: this bot replaces Join Queue with Leave Queue once you are in,
+ * so a button that has gone is a press that landed.
+ *
+ * Pressing again in that state is the thing worth avoiding. It is at best a
+ * needless interaction at a bot already struggling, and at worst - if the bot
+ * treats one custom_id as a toggle - it joins the queue and then leaves it.
+ *
+ * Not cached is treated as still there: a cold store must not quietly disable
+ * retries, which is the whole reason the outcome watch exists.
+ */
+function buttonStillOnPanel(target: TicketTarget): boolean {
+    const message = cachedMessage(target.channelId, target.messageId);
+    if (!message) return true;
+
+    return collectButtons(message.components)
+        .some(button => customIdOf(button) === target.customId && !button.disabled);
+}
+
+/**
  * Sends the button press and waits to hear what became of it.
  *
  * The REST response alone cannot settle this: Discord answers as soon as it has
@@ -83,8 +108,10 @@ const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
  * it is what "joined" is reported from - so a join is claimed only when something
  * actually confirmed one.
  *
- * "sent" remains for the case where this build reports no outcome at all. It is
- * the old, weaker claim: the request was accepted and nothing more is known.
+ * "sent" is the weaker claim - the request was accepted and nothing more is known
+ * - and covers two cases: a build that reports no outcome at all, and a panel
+ * whose button has gone before a retry, where the press evidently landed but
+ * nothing local confirmed it.
  */
 export async function press(target: TicketTarget): Promise<PressResult> {
     const sessionId = getSessionId();
@@ -123,6 +150,11 @@ export async function press(target: TicketTarget): Promise<PressResult> {
         if (lastOutcome === "unknown") return "sent";
 
         if (attempt < MAX_ATTEMPTS) {
+            if (!buttonStillOnPanel(target)) {
+                logger.info(`"${target.label}" is no longer on the panel in #${target.channelName}, so the press landed after all; not retrying.`);
+                return "sent";
+            }
+
             logger.warn(`The bot did not act on the press in #${target.channelName} (attempt ${attempt}/${MAX_ATTEMPTS}); retrying.`);
             await sleep(RETRY_DELAY_MS);
         }
