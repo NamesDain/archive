@@ -113,9 +113,19 @@ desk, which is the exact failure the desktop idle gate existed to prevent.
 
 **Pressing the button.** Desktop tried an `/interactions` POST and fell back to clicking the
 rendered button in the DOM. React Native has no DOM, so the REST path is the only one. It needs
-a gateway `session_id`, which desktop read from `AuthenticationStore`; mobile has no such store,
-so the id is taken from the `CONNECTION_OPEN` dispatch the plugin already subscribes to. A press
-attempted before any connect is refused with its own distinct reason rather than a confusing 400.
+a gateway `session_id`, which desktop read from `AuthenticationStore`; mobile has no store by
+that name, so several are tried by shape, and the id a connect dispatch carried is the fallback
+for a build where none of them answer. The live lookup wins: a dispatch's id is a snapshot that
+the next reconnect invalidates. A press attempted before any of that is refused with its own
+distinct reason rather than a confusing 400.
+
+**Knowing whether the press landed.** A 204 from `/interactions` only means Discord accepted it
+for delivery — it says nothing about whether the bot acted. The client's own `INTERACTION_SUCCESS`
+and `INTERACTION_FAILURE` dispatches do, and a capture confirmed both fire here. They are matched
+back to a press by the nonce it was sent with, or, when the outcome carries no nonce, by there
+being exactly one press in flight. A press is only reported as *rejected* — the verdict that
+drives a retry — on a build that names the press in its outcome; otherwise a timeout is reported
+as "sent" and nothing is retried on the strength of it.
 
 **Notifications.** There is no desktop-notification API from inside the mobile client. The two
 alerts that matter — you won the draw, and a draw is closing while you are away — are modals
@@ -145,10 +155,19 @@ What the plugin does about it: a return to the foreground triggers a catch-up sw
 one sweep even if another ran moments earlier, and the sweep can list channels over REST when the
 store is still cold. A draw closes in roughly a minute, so the wake path is deliberately quick.
 
-Reconnects are caught two ways. Current Discord iOS fires **`CONNECTION_RESUMED`** and
-**`SESSIONS_REPLACE`**, not the `CONNECTION_OPEN` the desktop client uses — and not the `RESUMED`
-or `SESSION_REPLACE` that guessing produced, both wrong by one word. `/taq events` found the real
-names by watching the dispatcher, which is the only reliable way to learn them.
+Reconnects are caught two ways. A 15-minute capture on the device recorded, in order of how often
+they fired: **`SESSIONS_REPLACE`** ×16, **`CONNECTION_RESUMED`** ×11, **`POST_CONNECTION_OPEN`** ×4,
+**`CONNECTION_OPEN`** ×3 and **`CONNECTION_OPEN_SUPPLEMENTAL`** ×3. All five are subscribed.
+
+Note the third and fourth: an earlier two-minute capture caught neither, and this project wrote
+down "CONNECTION_OPEN does not fire on current Discord iOS" as a fact on that basis. It was a
+window too short to contain a reconnect — which is the whole reason `/taq events` now takes one
+long enough to span the thing being looked for. The guessed names (`RESUMED`, `SESSION_REPLACE`)
+are still subscribed but have never been seen.
+
+`SESSIONS_REPLACE` is the odd one out: it is the account's session list changing, which any other
+device can cause, so it triggers a sweep but is not treated as a new connection and never supplies
+a session id.
 
 The backstop stays regardless: a gateway session id belongs to one connection, so a new one is
 proof the old connection went away, and the plugin polls often enough to notice. That needs no

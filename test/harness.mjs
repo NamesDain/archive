@@ -87,6 +87,12 @@ export function createMockVendetta({ modernComponents = true } = {}) {
     let moduleSessionId = null;
     const nextOutcome = () => (interactionOutcomes.length ? interactionOutcomes.shift() : "joined");
 
+    // Whether an outcome dispatch carries the nonce that was sent. A device capture
+    // proved INTERACTION_SUCCESS fires on current Discord iOS but could not show
+    // whether it echoes the nonce, so the plugin has to work either way and both
+    // are exercised.
+    let echoesNonce = true;
+
     const RestAPI = {
         async get(options) {
             calls.rest.push({ method: "get", ...options });
@@ -102,7 +108,8 @@ export function createMockVendetta({ modernComponents = true } = {}) {
                     // The real client dispatches this a moment after the request.
                     setTimeout(() => {
                         const event = outcome === "joined" ? "INTERACTION_SUCCESS" : "INTERACTION_FAILURE";
-                        for (const handler of fluxHandlers.get(event) ?? []) handler({ nonce });
+                        const payload = echoesNonce ? { nonce } : {};
+                        for (const handler of fluxHandlers.get(event) ?? []) handler(payload);
                     }, 1);
                 }
             }
@@ -231,7 +238,9 @@ export function createMockVendetta({ modernComponents = true } = {}) {
         interceptors,
         dispatchRaw: action => FluxDispatcher._dispatchRaw(action),
         /** Stands in for the client's own session id, which changes on every reconnect. */
-        setModuleSessionId(id) { moduleSessionId = id; }
+        setModuleSessionId(id) { moduleSessionId = id; },
+        /** false makes outcome dispatches arrive with no nonce to match them by. */
+        setNonceEcho(on) { echoesNonce = on; }
     };
 }
 

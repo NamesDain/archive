@@ -34,8 +34,11 @@ const COMPONENT_TYPE_BUTTON = 2;
 export type PressResult = "joined" | "sent" | "rejected" | "failed" | "no-session";
 
 function generateNonce(): string {
-    // Discord only requires per-request uniqueness here.
-    return String(BigInt(Date.now() - 1420070400000) << 22n);
+    // Snowflake-shaped, and unique per press rather than per millisecond: the
+    // client matches an outcome back to a press by this value, so two presses
+    // sharing one would have the second's outcome settle the first.
+    const ms = BigInt(Date.now() - 1420070400000) << 22n;
+    return String(ms | BigInt(Math.floor(Math.random() * 4194304)));
 }
 
 export async function clickViaApi(target: TicketTarget, sessionId: string, nonce: string): Promise<any> {

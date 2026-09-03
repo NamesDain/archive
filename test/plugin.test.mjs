@@ -744,7 +744,7 @@ describe("what a press actually claims", () => {
         );
 
         const report = c.calls.botMessages.at(-1).content;
-        assert.match(report, /\*\*Gateway session:\*\* held via CONNECTION_OPEN/);
+        assert.match(report, /\*\*Gateway session:\*\* held via a connect dispatch/);
         assert.doesNotMatch(report, /sess-abc/, "the session id is a live credential, never printed whole");
         c.plugin.onUnload();
     });
@@ -1109,7 +1109,13 @@ describe("the gateway session id", () => {
         c.plugin.onUnload();
     });
 
-    it("prefers what CONNECTION_OPEN supplied over a module lookup", async () => {
+    // This used to be the other way round, on the reasoning that mobile has no
+    // AuthenticationStore so a dispatch was the more trustworthy source. It is the
+    // less trustworthy one: it is a snapshot that the next reconnect invalidates,
+    // where the lookup is the client's own live value - and the reconnect backstop
+    // watches that same lookup for a change, so a remembered id winning would
+    // freeze the one signal that does not depend on an event name being right.
+    it("prefers the live lookup over what a connect supplied", async () => {
         const c = withoutConnectionOpen();
         c.setModuleSessionId("from-lookup");
         dispatch(c.fluxHandlers, "CONNECTION_OPEN", { sessionId: "from-connect" });
@@ -1121,7 +1127,24 @@ describe("the gateway session id", () => {
 
         assert.equal(
             c.calls.rest.find(r => r.url === "/interactions").body.session_id,
-            "from-connect"
+            "from-lookup"
+        );
+        c.plugin.onUnload();
+    });
+
+    it("falls back to a connect's id when no lookup answers", async () => {
+        const c = withoutConnectionOpen();
+        dispatch(c.fluxHandlers, "CONNECTION_OPEN", { sessionId: "from-connect" });
+
+        dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
+            message: makeTicketPanel({ id: "1104", channelId: TICKET_CHANNEL_ID, botId: BOT_ID })
+        });
+        await settle();
+
+        assert.equal(
+            c.calls.rest.find(r => r.url === "/interactions").body.session_id,
+            "from-connect",
+            "the dispatch is still the answer on a build where no store exposes one"
         );
         c.plugin.onUnload();
     });
@@ -1180,14 +1203,16 @@ describe("the gateway session id", () => {
 
 describe("finding the gateway connect event this build uses", () => {
     // A device reported "Gateway connects seen: none since load" while plainly
-    // reconnecting, so CONNECTION_OPEN does not fire there and the reconnect
-    // sweep never ran. Every plausible name is subscribed, and status names the
-    // ones that actually arrive rather than leaving it to be guessed.
+    // reconnecting, and CONNECTION_OPEN was written off on that evidence. A later
+    // capture caught it firing three times in fifteen minutes: the window had been
+    // too short to contain a reconnect. Every plausible name is subscribed, and
+    // status names the ones that actually arrive rather than leaving it to be
+    // guessed.
     for (const [event, payload, expectedId] of [
         ["READY", { session_id: "from-ready" }, "from-ready"],
         ["RESUMED", { sessionId: "from-resumed" }, "from-resumed"],
-        ["SESSION_REPLACE", { session_id: "from-replace" }, "from-replace"],
-        ["CONNECTION_OPEN_SUPPLEMENTAL", { sessionId: "from-supplemental" }, "from-supplemental"]
+        ["CONNECTION_OPEN_SUPPLEMENTAL", { sessionId: "from-supplemental" }, "from-supplemental"],
+        ["POST_CONNECTION_OPEN", { sessionId: "from-post-open" }, "from-post-open"]
     ]) {
         it(`takes the session id from ${event}`, async () => {
             const c = loadConfigured();
@@ -1205,6 +1230,26 @@ describe("finding the gateway connect event this build uses", () => {
             c.plugin.onUnload();
         });
     }
+
+    // Both spellings of the session-list event describe the account's other
+    // sessions, not this connection - so a press must never go out under an id
+    // read from one, whichever name a build uses.
+    it("takes no session id from SESSION_REPLACE, whose payload is not this connection's", async () => {
+        const c = loadConfigured();
+        c.setModuleSessionId("live-3");
+        dispatch(c.fluxHandlers, "SESSION_REPLACE", { session_id: "from-replace" });
+
+        dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
+            message: makeTicketPanel({ id: "1210", channelId: TICKET_CHANNEL_ID, botId: BOT_ID })
+        });
+        await settle();
+
+        assert.equal(
+            c.calls.rest.find(r => r.url === "/interactions").body.session_id,
+            "live-3"
+        );
+        c.plugin.onUnload();
+    });
 
     it("reads a session id nested inside a READY payload", async () => {
         const c = loadConfigured();
@@ -1479,21 +1524,132 @@ describe("when the client never reports an outcome", () => {
     });
 });
 
+// A 15-minute capture on the device recorded INTERACTION_CREATE ×1 and
+// INTERACTION_SUCCESS ×1, which settles the question this whole path was written
+// without an answer to: outcomes are reported here. What it cannot show is
+// whether the outcome carries the nonce back, so both have to work.
+describe("matching an outcome to the press it belongs to", () => {
+    const OTHER_CHANNEL = "777777777777777777";
+
+    function addChannel(c, id, name) {
+        c.stores.ChannelStore._channels.set(id, makeChannel({
+            id, name, parentId: CATEGORY_ID, guildId: GUILD_ID
+        }));
+    }
+
+    async function pressIn(c, id, channelId) {
+        dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
+            message: makeTicketPanel({ id, channelId, botId: BOT_ID })
+        });
+        await settle();
+    }
+
+    function status(c) {
+        c.registeredCommands[0].execute(
+            [{ name: "action", value: "status" }],
+            { channel: { id: TICKET_CHANNEL_ID } }
+        );
+        return c.calls.botMessages.at(-1).content;
+    }
+
+    it("recognises an outcome that comes back without the nonce", async () => {
+        const c = loadConfigured();
+        c.setNonceEcho(false);
+
+        await pressIn(c, "1600", TICKET_CHANNEL_ID);
+
+        assert.equal(c.calls.toasts.length, 1, "the press must settle on the outcome, not time out");
+        assert.match(
+            c.calls.toasts[0].content, /Joined queue/,
+            "an outcome arriving while one press is in flight belongs to that press"
+        );
+        c.plugin.onUnload();
+    });
+
+    // The one that bites: a build that reports outcomes without the nonce used to
+    // leave every press to time out, and a timeout after any outcome had been seen
+    // was reported as a rejection - so a bot doing nothing wrong looked like one
+    // dropping every press, three attempts at a time.
+    it("does not call a press rejected when no nonce ever comes back", async () => {
+        const c = loadConfigured();
+        c.setNonceEcho(false);
+        c.interactionOutcomes.push("joined", "silent");
+
+        await pressIn(c, "1601", TICKET_CHANNEL_ID);
+        assert.equal(c.calls.toasts.length, 1, "the first press establishes that outcomes are reported");
+
+        addChannel(c, OTHER_CHANNEL, "ticket-0009");
+        await pressIn(c, "1602", OTHER_CHANNEL);
+        await silentPress();
+
+        assert.equal(c.calls.toasts.length, 2, "the second press must not spend three attempts on a timeout");
+        assert.match(
+            c.calls.toasts[1].content, /Pressed Join Queue/,
+            "a timeout on a build that never names the press is not evidence the bot dropped it"
+        );
+        c.plugin.onUnload();
+    });
+
+    it("ignores an outcome carrying somebody else's nonce", async () => {
+        const c = loadConfigured();
+        c.interactionOutcomes.push("silent");
+
+        await pressIn(c, "1603", TICKET_CHANNEL_ID);
+
+        // A manual tap elsewhere in the client resolves while our press is waiting.
+        dispatch(c.fluxHandlers, "INTERACTION_SUCCESS", { nonce: "9999999999" });
+        await settle();
+
+        assert.equal(
+            c.calls.toasts.length, 0,
+            "a named outcome that is not ours must not settle our press as joined"
+        );
+
+        await silentPress();
+        assert.match(c.calls.toasts[0].content, /Pressed Join Queue/, "ours resolves on its own timeout");
+        c.plugin.onUnload();
+    });
+
+    it("says in the status report how outcomes are being matched", async () => {
+        const echoed = loadConfigured();
+        await pressIn(echoed, "1604", TICKET_CHANNEL_ID);
+        assert.match(status(echoed), /matched by nonce, so a press the bot drops is retried/);
+        echoed.plugin.onUnload();
+
+        const anonymous = loadConfigured();
+        anonymous.setNonceEcho(false);
+        await pressIn(anonymous, "1605", TICKET_CHANNEL_ID);
+        assert.match(status(anonymous), /a single press is in flight/);
+        anonymous.plugin.onUnload();
+    });
+});
+
 describe("the connect events this build really fires", () => {
     // Found by /taq events on a device, not by guessing: the seven candidates in
     // the previous round included RESUMED and SESSION_REPLACE, and the real names
     // are CONNECTION_RESUMED and SESSIONS_REPLACE. Both near-misses by one word.
+    //
+    // A longer capture later added POST_CONNECTION_OPEN, and caught CONNECTION_OPEN
+    // firing three times - which this project had already written down as an event
+    // that never fires here, on the strength of a two-minute window that contained
+    // no reconnect.
     it("subscribes to the names the probe actually observed", () => {
         const { vendetta, fluxHandlers } = createMockVendetta();
         const plugin = evalPlugin(BUNDLE, vendetta);
         plugin.onLoad();
 
-        assert.equal(fluxHandlers.get("CONNECTION_RESUMED").size, 1);
-        assert.equal(fluxHandlers.get("SESSIONS_REPLACE").size, 1);
+        const observed = [
+            "SESSIONS_REPLACE", "CONNECTION_RESUMED", "POST_CONNECTION_OPEN",
+            "CONNECTION_OPEN", "CONNECTION_OPEN_SUPPLEMENTAL"
+        ];
+        for (const name of observed) {
+            assert.equal(fluxHandlers.get(name)?.size, 1, `${name} fires on the device and must be subscribed`);
+        }
 
         plugin.onUnload();
-        assert.equal(fluxHandlers.get("CONNECTION_RESUMED").size, 0);
-        assert.equal(fluxHandlers.get("SESSIONS_REPLACE").size, 0);
+        for (const name of observed) {
+            assert.equal(fluxHandlers.get(name).size, 0, `${name} must be unsubscribed on unload`);
+        }
     });
 
     it("sweeps on CONNECTION_RESUMED", async () => {
@@ -1549,6 +1705,49 @@ describe("the connect events this build really fires", () => {
             c.calls.rest.find(r => r.url === "/interactions").body.session_id,
             "live-session",
             "the live id must win over anything in a sessions list"
+        );
+        c.plugin.onUnload();
+    });
+
+    // SESSIONS_REPLACE fired sixteen times in a quarter of an hour on the device -
+    // more often than any real connect - because any other device changing presence
+    // causes one. It is worth sweeping on, but it opens no connection.
+    it("keeps the id from a connect when SESSIONS_REPLACE follows it", async () => {
+        const c = loadConfigured();
+
+        dispatch(c.fluxHandlers, "SESSIONS_REPLACE", { sessions: [{ sessionId: "another-device" }] });
+
+        dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
+            message: makeTicketPanel({ id: "1510", channelId: TICKET_CHANNEL_ID, botId: BOT_ID })
+        });
+        await settle();
+
+        const press = c.calls.rest.find(r => r.url === "/interactions");
+        assert.ok(press, "a press must still be possible after a sessions list changes");
+        assert.equal(
+            press.body.session_id, "sess-abc",
+            "another device changing presence must not throw away this connection's id"
+        );
+        c.plugin.onUnload();
+    });
+
+    // The remembered id is a snapshot; the client's own value is not. Preferring
+    // the snapshot would also shadow the id-change backstop, which is the one
+    // reconnect signal that needs no event name to be right.
+    it("presses under the live id, not the one a connect carried", async () => {
+        const c = loadConfigured();
+        c.setModuleSessionId("live-2");
+
+        dispatch(c.fluxHandlers, "CONNECTION_OPEN", { sessionId: "from-the-event" });
+        dispatch(c.fluxHandlers, "MESSAGE_CREATE", {
+            message: makeTicketPanel({ id: "1511", channelId: TICKET_CHANNEL_ID, botId: BOT_ID })
+        });
+        await settle();
+
+        assert.equal(
+            c.calls.rest.find(r => r.url === "/interactions").body.session_id,
+            "live-2",
+            "a dispatch's id is a snapshot and must not win over the client's own"
         );
         c.plugin.onUnload();
     });

@@ -17,6 +17,13 @@
 // This is what makes a retry possible at all, and a retry is the point: the
 // ticket bot drops presses on some tickets, for manual taps as well as ours, and
 // without this a dropped press is a ticket silently never joined.
+//
+// A 15-minute /taq events capture on the device settled the question this file
+// was written not knowing the answer to: INTERACTION_CREATE and INTERACTION_SUCCESS
+// both fire on current Discord iOS. So outcomes are reported here, and everything
+// below is live rather than a path that might never run. What that capture cannot
+// say is whether the outcome carries the nonce back, which is why a press is now
+// identifiable both ways - see resolve().
 
 import { logger } from "@vendetta";
 import { FluxDispatcher } from "@vendetta/metro/common";
@@ -49,23 +56,54 @@ let outcomesObserved = false;
  */
 let timedOutWithoutAnyOutcome = false;
 
+/**
+ * Whether an outcome has ever come back carrying the nonce that was sent.
+ *
+ * This decides what a timeout means. If outcomes are matched by nonce, one that
+ * never arrives is evidence the press was dropped, and a retry is warranted. If
+ * they arrive without it, a timeout only means the outcome could not be tied to
+ * a press - and retrying every press on that would hammer a bot that is already
+ * struggling.
+ */
+let nonceEchoed = false;
+
 function nonceOf(event: any): string | undefined {
     const nonce = event?.nonce ?? event?.interaction?.nonce ?? event?.interactionNonce;
     return nonce === undefined || nonce === null ? undefined : String(nonce);
+}
+
+function settleWaiter(nonce: string, waiter: Waiter, outcome: Outcome): void {
+    clearTimeout(waiter.timer);
+    waiting.delete(nonce);
+    waiter.settle(outcome);
 }
 
 function resolve(event: any, outcome: Outcome): void {
     outcomesObserved = true;
 
     const nonce = nonceOf(event);
-    if (!nonce) return;
+    if (nonce !== undefined) {
+        // A nonce that is not one of ours belongs to a different press - a manual
+        // tap somewhere else in the client - and settling on it would report that
+        // press's outcome as this one's.
+        const waiter = waiting.get(nonce);
+        if (!waiter) return;
 
-    const waiter = waiting.get(nonce);
-    if (!waiter) return;
+        nonceEchoed = true;
+        settleWaiter(nonce, waiter, outcome);
+        return;
+    }
 
-    clearTimeout(waiter.timer);
-    waiting.delete(nonce);
-    waiter.settle(outcome);
+    // No nonce came back. The press is still identifiable whenever exactly one is
+    // in flight, which is the ordinary case here: presses are seconds apart and
+    // the window is four. Dropping the outcome instead would leave every press to
+    // time out, and a timeout after an outcome has been seen used to be reported
+    // as a rejection - so a build that reports outcomes without the nonce would
+    // have had every successful press counted as one the bot ignored.
+    if (waiting.size !== 1) return;
+
+    const [[only, waiter]] = [...waiting];
+    settleWaiter(only, waiter, outcome);
 }
 
 const onSuccess = (event: any) => {
@@ -122,9 +160,11 @@ export function awaitOutcome(nonce: string, timeoutMs: number): Promise<Outcome>
         const timer = setTimeout(() => {
             waiting.delete(nonce);
             if (!outcomesObserved) timedOutWithoutAnyOutcome = true;
-            // A client that has never reported an outcome is not evidence of a
-            // failed press, only of a client that does not report.
-            settle(outcomesObserved ? "rejected" : "unknown");
+            // "rejected" claims the bot dropped this press, and only a build that
+            // ties outcomes back to a press by nonce supports that claim. A client
+            // that has never reported an outcome, or reports them without saying
+            // which press they belong to, is not evidence of a failed press.
+            settle(outcomesObserved && nonceEchoed ? "rejected" : "unknown");
         }, timeoutMs);
 
         waiting.set(nonce, { settle, timer });
@@ -141,8 +181,18 @@ export function outcomeReportingRuledOut(): boolean {
     return !outcomesObserved && timedOutWithoutAnyOutcome;
 }
 
+/**
+ * How outcomes are being matched to presses, for the status report. Whether the
+ * nonce comes back decides whether a retry can be justified, so it is worth
+ * being able to read off the device rather than inferred.
+ */
+export function outcomeMatching(): "nonce" | "in-flight" {
+    return nonceEchoed ? "nonce" : "in-flight";
+}
+
 /** Test seam; also keeps a reload from inheriting the previous session's verdict. */
 export function resetInteractionWatch(): void {
     outcomesObserved = false;
     timedOutWithoutAnyOutcome = false;
+    nonceEchoed = false;
 }

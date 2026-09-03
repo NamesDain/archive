@@ -18,8 +18,8 @@ import {
     release, reserve, resetGates, resume, startActivityTracking, stopActivityTracking, withinActiveHours
 } from "./gates";
 import {
-    outcomeReportingRuledOut, outcomeReportingSeen, resetInteractionWatch, startInteractionWatch,
-    stopInteractionWatch
+    outcomeMatching, outcomeReportingRuledOut, outcomeReportingSeen, resetInteractionWatch,
+    startInteractionWatch, stopInteractionWatch
 } from "./interactions";
 import { clearHistory, describe as describeEntry, record, recent } from "./history";
 import { collectButtons, customIdOf, matchTicket } from "./matcher";
@@ -485,7 +485,9 @@ function statusReport(): string {
     // saying confirmation is unavailable would be reading failure into silence.
     const pressed = getStats().pressesSent;
     lines.push(`**Press confirmation:** ${outcomeReportingSeen()
-        ? "working — a join is only reported once the client confirms it"
+        ? `working — a join is only reported once the client confirms it (matched ${outcomeMatching() === "nonce"
+            ? "by nonce, so a press the bot drops is retried"
+            : "while a single press is in flight; no nonce comes back, so a timeout is not treated as a rejection"})`
         : outcomeReportingRuledOut()
             ? `_this build does not report outcomes; no retries, and presses no longer wait for one_`
             : pressed === 0
