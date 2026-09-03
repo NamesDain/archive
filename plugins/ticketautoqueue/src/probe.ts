@@ -24,6 +24,11 @@ import { FluxDispatcher } from "@vendetta/metro/common";
 // would bury those in the hundreds of routine ones a client fires per minute.
 const INTERESTING = /CONNECT|READY|RESUME|SESSION|GATEWAY|SOCKET|INTERACTION/i;
 
+// Voice and media telemetry matches the filter on "CONNECTION" and fires roughly
+// ten times a minute regardless of anything this plugin cares about. Two capture
+// runs so far have been mostly this.
+const NOISE = /^MEDIA_ENGINE|^VOICE_|^AUDIO_|_STATS$/i;
+
 // A cap, so a pathological run cannot grow this without bound.
 const MAX_TYPES = 100;
 
@@ -32,6 +37,7 @@ const seen = new Map<string, number>();
 let installed = false;
 let capturing = false;
 let startedAt = 0;
+let stopsAt = 0;
 let stopTimer: ReturnType<typeof setTimeout> | null = null;
 
 /**
@@ -44,7 +50,8 @@ function intercept(action: any): boolean {
         if (!capturing) return false;
 
         const type = action?.type;
-        if (typeof type !== "string" || !INTERESTING.test(type)) return false;
+        if (typeof type !== "string") return false;
+        if (!INTERESTING.test(type) || NOISE.test(type)) return false;
 
         const count = seen.get(type);
         if (count !== undefined) seen.set(type, count + 1);
@@ -81,6 +88,7 @@ export function startProbe(durationMs: number): boolean {
 
     seen.clear();
     startedAt = Date.now();
+    stopsAt = startedAt + durationMs;
     capturing = true;
 
     if (stopTimer !== null) clearTimeout(stopTimer);
@@ -90,14 +98,23 @@ export function startProbe(durationMs: number): boolean {
 
 export function stopProbe(): void {
     capturing = false;
+    stopsAt = 0;
     if (stopTimer !== null) clearTimeout(stopTimer);
     stopTimer = null;
 }
 
+function remainingText(): string {
+    if (!capturing || stopsAt === 0) return "";
+    const left = Math.max(0, Math.round((stopsAt - Date.now()) / 60000));
+    return ` Still watching for another ${left} min — run this again any time for an updated list.`;
+}
+
 export function probeReport(): string {
+    const elapsed = Math.round((Date.now() - startedAt) / 1000);
+
     if (seen.size === 0) {
         return capturing
-            ? "Still watching — nothing matching yet. Switch apps or let the connection drop, then run this again."
+            ? `Nothing matching in ${elapsed}s yet.${remainingText()}`
             : "Nothing was captured. Either no relevant dispatch fired, or this build routes them somewhere the probe cannot see.";
     }
 
@@ -105,15 +122,16 @@ export function probeReport(): string {
         .sort((a, b) => b[1] - a[1])
         .map(([type, count]) => `- \`${type}\` ×${count}`);
 
-    const elapsed = Math.round((Date.now() - startedAt) / 1000);
     return [
-        `**Dispatches seen in ${elapsed}s** (connect, session and interaction families only):`,
-        ...rows
-    ].join("\n");
+        `**Dispatches seen in ${elapsed}s** (connect, session and interaction families; media telemetry excluded):`,
+        ...rows,
+        remainingText().trim()
+    ].filter(Boolean).join("\n");
 }
 
 export function resetProbe(): void {
     stopProbe();
     seen.clear();
     startedAt = 0;
+    stopsAt = 0;
 }
